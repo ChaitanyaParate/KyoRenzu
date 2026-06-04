@@ -61,6 +61,7 @@ def run_recommendations(
     csv_file,
     preference: str,
     top_n: int,
+    preferred_year: int | None = None,
 ) -> tuple:
     """
     Returns: (gallery_items, table_markdown, status_message)
@@ -88,17 +89,26 @@ def run_recommendations(
     pref_text = preference.strip() if preference else ""
     text_embedding = None
     genre_filter = None
+    era_year = None
 
     if pref_text:
         try:
             enc = EncodedPreference(pref_text)
             text_embedding = enc.text_embedding
             genre_filter = enc.genres if enc.genres else None
+            era_year = enc.era_year
         except Exception as e:
             return [], "", f"❌ Preference encoding failed: {e}"
 
         if genre_filter:
             status_lines.append(f"🎯 Detected genres: **{', '.join(sorted(genre_filter))}**")
+        if era_year:
+            status_lines.append(f"📅 Era preference: **{era_year}**")
+
+    # Manual year input overrides everything (highest priority)
+    if preferred_year and int(preferred_year) > 1900:
+        era_year = int(preferred_year)
+        status_lines.append(f"📅 Era year (manual override): **{era_year}**")
 
     # ── Get recommendations ───────────────────────────────────────────────────
     try:
@@ -109,6 +119,7 @@ def run_recommendations(
             liked_anime=liked_anime,
             preference_text_embed=text_embedding,
             genre_filter=genre_filter,
+            era_year=era_year,
             top_n=fetch_n,
             n_candidates=n_candidates,
         )
@@ -207,6 +218,15 @@ with gr.Blocks(
                 value=6,
                 label="Number of recommendations",
             )
+            preferred_year_input = gr.Number(
+                label="Preferred release year (optional)",
+                value=None,
+                minimum=1960,
+                maximum=2026,
+                step=1,
+                info="Leave blank to auto-infer from your watchlist. "
+                     "Examples: 1995 = classics, 2005 = early 2000s, 2023 = recent.",
+            )
 
             run_btn = gr.Button("✨ Get Recommendations", variant="primary", elem_id="run-btn")
 
@@ -229,20 +249,21 @@ with gr.Blocks(
     # ── Examples ──────────────────────────────────────────────────────────────
     gr.Examples(
         examples=[
-            ["Death Note, Code Geass, Monster", None, "dark psychological thriller", 6],
-            ["Attack on Titan, Demon Slayer, Jujutsu Kaisen", None, "action shounen", 8],
-            ["Clannad, Toradora, Your Lie in April", None, "romance drama", 6],
-            ["Sword Art Online, Re:Zero, Overlord", None, "Isekai action", 6],
-            ["Steins;Gate, Ergo Proxy, Psycho-Pass", None, "sci-fi psychological", 8],
+            ["Death Note, Code Geass, Monster", None, "dark psychological thriller", 6, None],
+            ["Attack on Titan, Demon Slayer, Jujutsu Kaisen", None, "action shounen", 8, None],
+            ["Clannad, Toradora, Your Lie in April", None, "romance drama", 6, None],
+            ["Sword Art Online, Re:Zero, Overlord", None, "Isekai action", 6, None],
+            ["Steins;Gate, Ergo Proxy, Psycho-Pass", None, "sci-fi psychological", 8, None],
+            ["Cowboy Bebop, Trigun, Rurouni Kenshin", None, "action adventure", 6, 1998],
         ],
-        inputs=[anime_input, csv_file, preference, top_n],
+        inputs=[anime_input, csv_file, preference, top_n, preferred_year_input],
         label="Quick examples",
     )
 
     # ── Wire up ───────────────────────────────────────────────────────────────
     run_btn.click(
         fn=run_recommendations,
-        inputs=[anime_input, csv_file, preference, top_n],
+        inputs=[anime_input, csv_file, preference, top_n, preferred_year_input],
         outputs=[gallery, table, status_box],
     )
 

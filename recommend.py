@@ -229,6 +229,14 @@ Examples:
         default=0,
         help="Visual candidates before re-ranking (default: auto-scaled by input size)",
     )
+    parser.add_argument(
+        "--year", "-y",
+        type=int,
+        default=None,
+        metavar="YEAR",
+        help="Preferred release year (e.g. 1995 for classics, 2023 for recent). "
+             "Overrides era keywords in --preference and watchlist inference.",
+    )
 
     args = parser.parse_args()
 
@@ -250,6 +258,7 @@ Examples:
     # ── Step 2: Encode preference ─────────────────────────────────────────────
     preference_embed = None
     genre_filter = None
+    era_year = None
 
     if args.preference:
         console.rule("[bold cyan]Step 2 — Encoding Preference[/]")
@@ -258,14 +267,22 @@ Examples:
         pref = EncodedPreference(args.preference)
         preference_embed = pref.text_embedding
         genre_filter = pref.genres if pref.genres else None
+        era_year = pref.era_year
 
         if genre_filter:
             console.print(f"  [green]✔[/] Detected genres: [bold yellow]{', '.join(sorted(genre_filter))}[/]")
         else:
             console.print("  [dim]No specific genres detected — using visual preference only.[/]")
+        if era_year:
+            console.print(f"  [green]✔[/] Era preference detected: [bold yellow]{era_year}[/]")
         console.print()
     else:
         console.print("[dim]No preference provided — using visual similarity only.[/]\n")
+
+    # --year flag overrides everything (highest priority)
+    if args.year is not None:
+        era_year = args.year
+        console.print(f"  [green]✔[/] Era year override: [bold yellow]{era_year}[/] (from --year flag)\n")
 
     # ── Step 3: Get recommendations ───────────────────────────────────────────
     console.rule("[bold cyan]Step 3 — Finding Recommendations[/]")
@@ -285,6 +302,7 @@ Examples:
             liked_anime=liked_anime,
             preference_text_embed=preference_embed,
             genre_filter=genre_filter,
+            era_year=era_year,
             top_n=args.top_n + len(liked_anime) + 50,  # fetch extra; post-filter will trim
             n_candidates=n_candidates,
         )

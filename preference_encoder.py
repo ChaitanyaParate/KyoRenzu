@@ -136,7 +136,39 @@ SYNONYMS: dict[str, str] = {
     "power": "Super Power",
     "superpower": "Super Power",
     "super power": "Super Power",
+}
 
+# ── Era / decade keyword → target year ──────────────────────────────────────
+# Preference text keywords that signal a desired release era.
+# These are resolved to a specific year which becomes the center of a Gaussian
+# era-proximity score in the recommender.
+import datetime as _dt
+_CURRENT_YEAR = _dt.datetime.now().year
+
+ERA_KEYWORDS: dict[str, int] = {
+    # Old / classic
+    "classic":      1995,
+    "classics":     1995,
+    "old school":   1995,
+    "old-school":   1995,
+    "oldschool":    1995,
+    "retro":        1990,
+    "vintage":      1988,
+    "80s":          1985,
+    "90s":          1995,
+    "early 2000s":  2003,
+    "2000s":        2005,
+    "2010s":        2013,
+    # New / recent
+    "new":          _CURRENT_YEAR,
+    "newest":       _CURRENT_YEAR,
+    "recent":       _CURRENT_YEAR,
+    "modern":       _CURRENT_YEAR,
+    "latest":       _CURRENT_YEAR,
+    "seasonal":     _CURRENT_YEAR,
+    "current":      _CURRENT_YEAR,
+    "airing":       _CURRENT_YEAR,
+    "ongoing":      _CURRENT_YEAR,
 }
 
 # Build a lowercase lookup: phrase → canonical genre
@@ -165,6 +197,25 @@ def extract_genres(preference_text: str) -> set[str]:
             found.add(canonical)
 
     return found
+
+
+def extract_era_year(preference_text: str) -> int | None:
+    """
+    Detect an era preference from free text and return a target year (int) or None.
+
+    Examples:
+        "classic dark psychological"  → 1995
+        "new isekai romance"          → <current year>
+        "80s retro mecha"             → 1985
+        "dark psychological thriller" → None  (no era keyword)
+    """
+    text = preference_text.lower()
+    # Longest-match first (multi-word phrases before single words)
+    for phrase in sorted(ERA_KEYWORDS, key=len, reverse=True):
+        pattern = r'\b' + re.escape(phrase) + r'\b'
+        if re.search(pattern, text):
+            return ERA_KEYWORDS[phrase]
+    return None
 
 
 # ── CLIP text encoder (lazy-loaded) ─────────────────────────────────────────
@@ -213,13 +264,18 @@ class EncodedPreference:
     def __init__(self, raw_text: str):
         self.raw_text = raw_text
         self.genres: set[str] = extract_genres(raw_text)
+        self.era_year: int | None = extract_era_year(raw_text)
         self.text_embedding: np.ndarray = encode_preference_text(raw_text)
 
     def __repr__(self):
-        return f"EncodedPreference(genres={self.genres}, text='{self.raw_text}')"
+        return (
+            f"EncodedPreference(genres={self.genres}, "
+            f"era_year={self.era_year}, text='{self.raw_text}')"
+        )
 
 
 if __name__ == "__main__":
-    pref = EncodedPreference("dark psychological thriller with action")
+    pref = EncodedPreference("classic dark psychological thriller")
     print(f"Extracted genres: {pref.genres}")
+    print(f"Era year:         {pref.era_year}")
     print(f"Text embedding shape: {pref.text_embedding.shape}")

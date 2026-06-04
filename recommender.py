@@ -33,11 +33,17 @@ MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", 
 W_VISUAL = 0.70  # user taste vector (visual similarity)
 W_TEXT = 0.30  # preference text embedding
 
-# Final score weights  (must sum to 1.0)
+# Final score weights
 W_SIM = 0.45    # visual cover similarity
 W_SCORE = 0.28  # MAL community score
 W_POP = 0.17    # MAL member count (popularity)
 W_GENRE = 0.25  # genre relevance (0 when no genre filter; 0→1 based on overlap fraction)
+W_ERA = 0.10    # era proximity (Gaussian around user's preferred year)
+
+# Era scoring: Gaussian std-dev in years.
+# sigma=8 → an anime 8 years away from target scores ~0.61, 16 years away ~0.14.
+# Kept wide so "classic" fans still see some 2000s anime and vice-versa.
+ERA_SIGMA = 8.0
 
 
 # Minimum score threshold for candidates
@@ -184,7 +190,7 @@ def _load_anime_db() -> dict[int, dict]:
     c = conn.cursor()
     c.execute("""
         SELECT mal_id, title, title_english, title_japanese,
-               genres, score, scored_by, members, local_image_path
+               genres, score, scored_by, members, local_image_path, aired_from
         FROM anime
     """)
     rows = c.fetchall()
@@ -192,7 +198,14 @@ def _load_anime_db() -> dict[int, dict]:
 
     db = {}
     for row in rows:
-        mid, title, en, jp, genres, score, scored_by, members, img = row
+        mid, title, en, jp, genres, score, scored_by, members, img, aired_from = row
+        # Parse aired_from ("YYYY-MM-DD") to year int, or None
+        year = None
+        if aired_from:
+            try:
+                year = int(aired_from[:4])
+            except (ValueError, TypeError):
+                pass
         db[mid] = {
             "title": title or "",
             "title_english": en or "",
@@ -202,6 +215,7 @@ def _load_anime_db() -> dict[int, dict]:
             "scored_by": scored_by or 0,
             "members": members or 0,
             "local_image_path": img,
+            "year": year,
         }
     return db
 
@@ -271,6 +285,7 @@ def recommend(
     liked_anime: list[AnimeEntry],
     preference_text_embed: np.ndarray | None = None,
     genre_filter: set[str] | None = None,
+    era_year: int | None = None,
     top_n: int = 6,
     n_candidates: int = 150,
 ) -> list[Recommendation]:
@@ -281,6 +296,9 @@ def recommend(
         liked_anime: List of AnimeEntry objects from input_parser
         preference_text_embed: 512-d CLIP text embedding of preference string
         genre_filter: Set of MAL genre names to soft-filter by
+        era_year: Optional override for the target release year (from preference text
+                  e.g. "classic" → 1995, "new" → current year).  When None, the
+                  preferred era is inferred from the median year of liked anime.
         top_n: Number of final recommendations to return
         n_candidates: Number of visual candidates to retrieve before re-ranking
     """
@@ -327,6 +345,28 @@ def recommend(
         query_vec = query_vec / (np.linalg.norm(query_vec) + 1e-9)
     else:
         query_vec = taste_vec
+
+    # ── 3b. Infer preferred era from watched anime ────────────────────────────
+    # era_year override (from "classic"/"new" keywords) takes priority.
+    # Fallback: median year of the liked anime list (ignores entries with no year).
+    if era_year is None:
+        liked_years = [
+            anime_db[entry.mal_id]["year"]
+            for entry in liked_anime
+            if entry.mal_id in anime_db and anime_db[entry.mal_id]["year"] is not None
+        ]
+        if liked_years:
+            liked_years_sorted = sorted(liked_years)
+            mid = len(liked_years_sorted) // 2
+            preferred_year: int | None = liked_years_sorted[mid]
+        else:
+            preferred_year = None
+    else:
+        preferred_year = era_year
+
+    if preferred_year is not None:
+        print(f"  [recommender] Era preference: {preferred_year} "
+              f"({'explicit override' if era_year else 'inferred from watchlist'})")
 
     # ── 4. Cosine similarity over full index ──────────────────────────────────
     sims = _cosine_sim(query_vec, _embeddings_matrix)  # [N]
@@ -436,12 +476,25 @@ def recommend(
                     raw = per_req[0]
                 genre_relevance = raw if raw >= GENRE_THRESHOLD else 0.0
 
+        # Era proximity score: Gaussian centred on preferred_year.
+        # exp(-((candidate_year - preferred_year) / ERA_SIGMA)^2)
+        # → 1.0 at exact match, ~0.61 at ±sigma years, ~0.14 at ±2σ years.
+        # Disabled (0.0) when preferred_year is unknown or anime has no year.
+        era_score = 0.0
+        if preferred_year is not None:
+            candidate_year = info.get("year")
+            if candidate_year is not None:
+                diff = (candidate_year - preferred_year) / ERA_SIGMA
+                era_score = math.exp(-(diff ** 2))
+
         # Normalised sub-scores
         norm_score = (info["score"] - score_min) / score_range
         norm_pop = info["members"] / members_max
         vis_sim = float(masked_sims[row_idx])
 
-        final = W_SIM * vis_sim + W_SCORE * norm_score + W_POP * norm_pop + W_GENRE * genre_relevance
+        final = (W_SIM * vis_sim + W_SCORE * norm_score
+                 + W_POP * norm_pop + W_GENRE * genre_relevance
+                 + W_ERA * era_score)
 
         candidates.append((final, vis_sim, mal_id, info))
 
