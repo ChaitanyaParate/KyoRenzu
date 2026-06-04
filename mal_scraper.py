@@ -28,17 +28,19 @@ def setup_db():
                   members INTEGER,
                   genres TEXT,
                   image_url TEXT,
-                  local_image_path TEXT)''')
+                  local_image_path TEXT,
+                  aired_from TEXT)''')
     
     # Try to add columns if they don't exist (for existing DBs)
-    try:
-        c.execute("ALTER TABLE anime ADD COLUMN title_english TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        c.execute("ALTER TABLE anime ADD COLUMN title_japanese TEXT")
-    except sqlite3.OperationalError:
-        pass
+    for col in [
+        "ALTER TABLE anime ADD COLUMN title_english TEXT",
+        "ALTER TABLE anime ADD COLUMN title_japanese TEXT",
+        "ALTER TABLE anime ADD COLUMN aired_from TEXT",
+    ]:
+        try:
+            c.execute(col)
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     return conn
 
@@ -111,15 +113,26 @@ def process_page_data(anime_list, cursor, conn):
         all_tags = genres_list + themes_list + demographics_list
         genres = ", ".join(dict.fromkeys(all_tags))  # deduplicate, preserve order
         
+        # Release date — Jikan returns ISO 8601 string e.g. "2006-10-03T00:00:00+00:00"
+        # Keep only the date part (YYYY-MM-DD) for simplicity.
+        aired_from_raw = (anime.get('aired') or {}).get('from')
+        aired_from = aired_from_raw[:10] if aired_from_raw else None  # "2006-10-03"
+
         # Get large image if available, else normal
         images = anime.get('images', {}).get('jpg', {})
         image_url = images.get('large_image_url') or images.get('image_url')
 
         try:
-            cursor.execute('''INSERT OR REPLACE INTO anime 
-                              (mal_id, title, title_english, title_japanese, score, scored_by, members, genres, image_url, local_image_path)
-                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT local_image_path FROM anime WHERE mal_id = ?), NULL))''',
-                           (mal_id, title, title_english, title_japanese, score, scored_by, members, genres, image_url, mal_id))
+            cursor.execute(
+                '''INSERT OR REPLACE INTO anime 
+                   (mal_id, title, title_english, title_japanese, score, scored_by,
+                    members, genres, image_url, local_image_path, aired_from)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           COALESCE((SELECT local_image_path FROM anime WHERE mal_id = ?), NULL),
+                           ?)''',
+                (mal_id, title, title_english, title_japanese, score, scored_by,
+                 members, genres, image_url, mal_id, aired_from)
+            )
         except sqlite3.Error as e:
             print(f"DB Error on mal_id {mal_id}: {e}")
     conn.commit()
