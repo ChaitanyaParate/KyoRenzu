@@ -14,8 +14,9 @@ A multimodal anime recommendation engine that uses **CLIP visual embeddings** to
 4. **Searched against** 30,000+ anime cover embeddings via cosine similarity
 5. **Genre injection** — anime matching your requested genres are pulled directly into the candidate pool, even if they don't visually resemble your average taste
 6. **Genre relevance scored** using a co-occurrence correlation table built from 30k anime — soft-matching related genres (e.g. `Suspense` and `Psychological` both score high for "horror")
-7. **Re-ranked** by visual similarity, MAL score, popularity, and genre relevance
-8. **Post-filtered** to exclude anything already in your watched list
+7. **Era preference inferred** from your watchlist's median release year — or set explicitly via keywords (`"classic"`, `"retro"`, `"new"`) or the `--year` flag
+8. **Re-ranked** by visual similarity, MAL score, popularity, genre relevance, and era proximity
+9. **Post-filtered** to exclude anything already in your watched list
 
 ---
 
@@ -30,6 +31,12 @@ python recommend.py --input "Death Note, Code Geass, Monster" --preference "mind
 
 # Multi-genre cross-filtering
 python recommend.py --input Ani.csv --preference "Romance Horror" --top-n 10
+
+# Era-aware: prefer classic anime (around 1995)
+python recommend.py --input Ani.csv --preference "dark action" --year 1995
+
+# Era-aware: prefer recent anime
+python recommend.py --input Ani.csv --preference "isekai" --year 2023
 
 # Web GUI (opens in browser at http://localhost:7860)
 python gui.py
@@ -158,6 +165,7 @@ python gui.py
 Features:
 - Paste anime titles **or** upload your watchlist CSV/Excel directly
 - Free-text preference input with detected genre display
+- Optional **preferred release year** number input (overrides keyword + watchlist inference)
 - Slider for number of recommendations (3–20)
 - Cover image gallery output
 - Markdown results table with scores and genres
@@ -187,14 +195,15 @@ python recommend.py --input "Naruto, Bleach, One Piece" --preference "long shone
 
 ## ⚙️ Scoring Formula
 
-The final score is a weighted sum of four components:
+The final score is a weighted sum of five components:
 
 | Component | Weight | Description |
 |---|---|---|
 | Visual Match | 45% | CLIP cosine similarity of cover aesthetics |
 | MAL Score | 28% | Community rating from MyAnimeList |
 | Popularity | 17% | Number of MAL members |
-| Genre Relevance | 10% | Co-occurrence correlation score (0 if no genre filter or below threshold) |
+| Genre Relevance | 25% | Co-occurrence correlation score (0 if no genre filter or below threshold) |
+| Era Proximity | 10% | Gaussian score centred on preferred release year |
 
 The **query vector** is: `70% visual taste vector + 30% CLIP text embedding of your preference`
 
@@ -214,6 +223,38 @@ Genre matching goes beyond exact tag lookup. The system builds a **co-occurrence
 ### Supported preference keywords (examples)
 `horror`, `isekai`, `mind games`, `thriller`, `romance`, `sports`, `competition`, `mecha`, `military`, `vampire`, `psychological`, `slice of life`, `sci-fi`, `josei`, `seinen`, `shounen`, `ecchi`, `cars/racing`, `surreal`, `police`, `samurai`, `yaoi`, `yuri`, `gore`, `magic`, `harem`, `historical`, `mystery`, and more.
 
+### 📅 Era Proximity Scoring
+
+The system infers a **preferred release year** and rewards candidates close to it using a Gaussian decay:
+
+```
+era_score = exp( -( (candidate_year − preferred_year) / 8 )² )
+```
+
+| Distance from target | Score |
+|---|---|
+| ±0 years | 1.00 |
+| ±8 years | 0.37 |
+| ±16 years | 0.02 |
+
+**Three ways to set the preferred year (highest priority first):**
+
+1. **`--year` flag / GUI number input** — explicit manual override
+   ```bash
+   python recommend.py --input Ani.csv --preference "action" --year 1998
+   ```
+2. **Era keyword in preference text** — auto-detected
+
+   | Keyword | Target year |
+   |---|---|
+   | `classic`, `old school`, `90s` | 1995 |
+   | `retro` | 1990 |
+   | `80s`, `vintage` | 1985–1988 |
+   | `2000s`, `early 2000s` | 2003–2005 |
+   | `new`, `recent`, `modern`, `latest` | current year |
+
+3. **Inferred from your watchlist** — median release year of your watched anime
+
 ---
 
 ## 🔧 CLI Options
@@ -226,6 +267,7 @@ Arguments:
   --preference, -p  Free-text mood/genre preference (e.g. "dark psychological")
   --top-n, -n       Number of recommendations (default: 6)
   --candidates      Visual candidates before re-ranking (default: auto-scaled)
+  --year, -y        Preferred release year (e.g. 1995 for classics, 2023 for recent)
 ```
 
 ---
@@ -241,7 +283,7 @@ Arguments:
 | `preference_encoder.py` | Maps free-text preference to genre tags + CLIP text embedding |
 | `embed_covers.py` | One-time script to precompute CLIP embeddings for all covers |
 | `mal_scraper.py` | Async scraper for MyAnimeList metadata via Jikan API |
-| `anime_data.db` | SQLite database of 30k+ anime (title, score, genres, image URL) |
+| `anime_data.db` | SQLite database of 30k+ anime (title, score, genres, release date, image URL) |
 | `cover_embeddings.npy` | Precomputed 768-d CLIP embeddings for all covers |
 | `embedding_index.json` | Maps mal_id → row index in the embedding matrix (auto-generated) |
 | `genre_correlation.json` | Genre co-occurrence table (auto-generated / auto-updated) |
