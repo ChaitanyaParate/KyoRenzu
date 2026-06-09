@@ -73,8 +73,7 @@ source venv/bin/activate        # Linux / macOS
 
 ### 3. Install dependencies
 ```bash
-pip install torch torchvision transformers pillow pandas openpyxl \
-            rapidfuzz rich numpy aiohttp tqdm gradio
+pip install -r requirements.txt
 ```
 
 ### 4. Download the CLIP model (one-time, ~1.2 GB)
@@ -97,9 +96,9 @@ All required files are hosted on **Google Drive** — including precomputed embe
 
 | File | Size | Description |
 |---|---|---|
-| `anime_data.db` | 8.6 MB | SQLite metadata for 30k+ anime |
-| `cover_embeddings.npy` | 92.3 MB | Precomputed CLIP embeddings (skip step 6!) |
-| `covers.zip` | 2.7 GB | 30k+ anime cover images |
+| `anime_data.db` | 8.2 MB | SQLite metadata for 30k+ anime |
+| `cover_embeddings.npy` | 88 MB | Precomputed CLIP embeddings (skip step 6!) |
+| `covers.zip` | 2.5 GB | 30k+ anime cover images |
 
 > `embedding_index.json` (maps mal_id → row index, ~450 KB) is **auto-generated** the first time you run `recommend.py`. No download needed.
 
@@ -324,9 +323,9 @@ python embed_covers.py
 |---|---|
 | Anime in DB | 30,000+ |
 | Cover images | ~30,000 JPGs |
-| Database size | 8.6 MB |
-| Cover images size | 2.7 GB (`covers.zip`) |
-| Embedding size | 92.3 MB (`cover_embeddings.npy`) |
+| Database size | 8.2 MB |
+| Cover images size | 2.5 GB (`covers.zip`) |
+| Embedding size | 88 MB (`cover_embeddings.npy`) |
 
 📁 **[Download from Google Drive](https://drive.google.com/drive/folders/1uK-QmsqDfnumBUYL23d8LFKXycOW-AWY?usp=sharing)**
 
