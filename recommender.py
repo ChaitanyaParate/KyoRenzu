@@ -29,12 +29,17 @@ GENRE_CORR_PATH = "genre_correlation.json"  # cached co-occurrence table
 # Local model path — download once with: python download_model.py
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "clip-vit-large-patch14")
 
+SYNOPSIS_EMBEDDINGS_PATH = "synopsis_embeddings.npy"
+SYNOPSIS_INDEX_PATH = "synopsis_index.json"
+SYNOPSIS_MODEL_NAME = "all-MiniLM-L6-v2"
+
 # Blending weights
 W_VISUAL = 0.70  # user taste vector (visual similarity)
 W_TEXT = 0.30  # preference text embedding
 
 # Final score weights
 W_SIM = 0.45    # visual cover similarity
+W_PLOT = 0.20   # plot similarity (used if plot preference is given)
 W_SCORE = 0.28  # MAL community score
 W_POP = 0.17    # MAL member count (popularity)
 W_GENRE = 0.25  # genre relevance (0 when no genre filter; 0→1 based on overlap fraction)
@@ -72,6 +77,17 @@ _clip_model = None
 _clip_processor = None
 _device = None
 
+# ── Lazy SentenceTransformer loader ───────────────────────────────────────────
+_st_model = None
+
+def _get_st_model():
+    global _st_model
+    if _st_model is None:
+        from sentence_transformers import SentenceTransformer
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        _st_model = SentenceTransformer(SYNOPSIS_MODEL_NAME, device=device)
+    return _st_model
+
 
 def _get_clip():
     global _clip_model, _clip_processor, _device
@@ -93,7 +109,21 @@ _embeddings_matrix: np.ndarray | None = None
 _index: dict | None = None
 _reverse_index: dict | None = None  # row_idx → mal_id
 _genre_corr: dict | None = None     # (anime_genre, requested_genre) → float 0-1
+_synopsis_matrix: np.ndarray | None = None
+_synopsis_index: dict | None = None
 
+def _load_synopsis_index():
+    global _synopsis_matrix, _synopsis_index
+    if _synopsis_matrix is not None:
+        return
+    if not os.path.exists(SYNOPSIS_EMBEDDINGS_PATH) or not os.path.exists(SYNOPSIS_INDEX_PATH):
+        raise FileNotFoundError(
+            f"Synopsis index not found. Please run:\n"
+            f"  python embed_synopsis.py\n"
+        )
+    _synopsis_matrix = np.load(SYNOPSIS_EMBEDDINGS_PATH)
+    with open(SYNOPSIS_INDEX_PATH, "r") as f:
+        _synopsis_index = json.load(f)
 
 def _build_genre_correlation() -> dict:
     """Build a soft genre correlation table from co-occurrence in the anime DB.
@@ -277,6 +307,7 @@ class Recommendation(NamedTuple):
     members: int
     local_image_path: str | None
     similarity: float
+    plot_similarity: float | None
     final_score: float
 
 
@@ -284,6 +315,7 @@ class Recommendation(NamedTuple):
 def recommend(
     liked_anime: list[AnimeEntry],
     preference_text_embed: np.ndarray | None = None,
+    plot_preference_text: str | None = None,
     genre_filter: set[str] | None = None,
     era_year: int | None = None,
     top_n: int = 6,
@@ -370,6 +402,14 @@ def recommend(
 
     # ── 4. Cosine similarity over full index ──────────────────────────────────
     sims = _cosine_sim(query_vec, _embeddings_matrix)  # [N]
+
+    # ── 4b. Plot similarity ───────────────────────────────────────────────────
+    plot_sims = None
+    if plot_preference_text:
+        _load_synopsis_index()
+        st_model = _get_st_model()
+        plot_query = st_model.encode([plot_preference_text], normalize_embeddings=True)[0]
+        plot_sims = _cosine_sim(plot_query, _synopsis_matrix)
 
     # ── 5. Get top candidates, excluding liked anime ──────────────────────────
     liked_ids = {entry.mal_id for entry in liked_anime}
@@ -492,11 +532,22 @@ def recommend(
         norm_pop = info["members"] / members_max
         vis_sim = float(masked_sims[row_idx])
 
-        final = (W_SIM * vis_sim + W_SCORE * norm_score
+        plot_sim = 0.0
+        active_w_sim = W_SIM
+        active_w_plot = 0.0
+
+        if plot_sims is not None and _synopsis_index is not None:
+            syn_idx = _synopsis_index.get(str(mal_id))
+            if syn_idx is not None:
+                plot_sim = float(plot_sims[syn_idx])
+                active_w_sim = 0.25  # reduce visual weight when plot is used
+                active_w_plot = W_PLOT
+
+        final = (active_w_sim * vis_sim + active_w_plot * plot_sim + W_SCORE * norm_score
                  + W_POP * norm_pop + W_GENRE * genre_relevance
                  + W_ERA * era_score)
 
-        candidates.append((final, vis_sim, mal_id, info))
+        candidates.append((final, vis_sim, plot_sim if plot_sims is not None else None, mal_id, info))
 
     # Sort by final score descending
     candidates.sort(key=lambda x: x[0], reverse=True)
@@ -512,7 +563,7 @@ def recommend(
         best_mmr_score = -float("inf")
         best_idx = 0
 
-        for i, (final, vis_sim, mid, info) in enumerate(remaining):
+        for i, (final, vis_sim, plot_sim, mid, info) in enumerate(remaining):
             if str(mid) in _index:
                 cand_emb = _embeddings_matrix[_index[str(mid)]]
                 max_sim_to_selected = max(
@@ -528,14 +579,14 @@ def recommend(
 
         chosen = remaining.pop(best_idx)
         selected.append(chosen)
-        _, _, chosen_mid, _ = chosen
+        _, _, _, chosen_mid, _ = chosen
         if str(chosen_mid) in _index:
             selected_embs.append(_embeddings_matrix[_index[str(chosen_mid)]])
 
 
     # ── 9. Build results ──────────────────────────────────────────────────────
     results = []
-    for rank, (final, vis_sim, mal_id, info) in enumerate(selected, start=1):
+    for rank, (final, vis_sim, plot_sim, mal_id, info) in enumerate(selected, start=1):
         results.append(Recommendation(
             rank=rank,
             mal_id=mal_id,
@@ -547,6 +598,7 @@ def recommend(
             members=info["members"],
             local_image_path=info["local_image_path"],
             similarity=round(vis_sim, 4),
+            plot_similarity=round(plot_sim, 4) if plot_sim is not None else None,
             final_score=round(final, 4),
         ))
 

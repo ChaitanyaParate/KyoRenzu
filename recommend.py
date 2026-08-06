@@ -91,6 +91,7 @@ def print_recommendations(results: list[Recommendation], preference: str | None)
     table.add_column("Members", justify="right", style="green", width=9)
     table.add_column("Genres", style="dim", min_width=28)
     table.add_column("Visual\nSim", justify="center", style="blue", width=8)
+    table.add_column("Plot\nSim", justify="center", style="magenta", width=8)
 
     for r in results:
         score_str = f"[bold green]{r.score:.2f}[/]" if r.score >= 8.0 else \
@@ -99,6 +100,7 @@ def print_recommendations(results: list[Recommendation], preference: str | None)
 
         members_str = f"{r.members:,}"
         sim_str = f"{r.similarity:.3f}"
+        plot_sim_str = f"{r.plot_similarity:.3f}" if r.plot_similarity is not None else "—"
 
         table.add_row(
             str(r.rank),
@@ -108,6 +110,7 @@ def print_recommendations(results: list[Recommendation], preference: str | None)
             members_str,
             r.genres or "—",
             sim_str,
+            plot_sim_str,
         )
 
     console.print(table)
@@ -218,6 +221,11 @@ Examples:
         help="What type of anime you want (free text, e.g. 'dark psychological thriller')",
     )
     parser.add_argument(
+        "--plot-preference",
+        default=None,
+        help="Specific plot or synopsis preference (e.g. 'relaxing slice of life about camping')",
+    )
+    parser.add_argument(
         "--top-n", "-n",
         type=int,
         default=6,
@@ -301,6 +309,7 @@ Examples:
         results = recommend(
             liked_anime=liked_anime,
             preference_text_embed=preference_embed,
+            plot_preference_text=args.plot_preference,
             genre_filter=genre_filter,
             era_year=era_year,
             top_n=args.top_n + len(liked_anime) + 50,  # fetch extra; post-filter will trim

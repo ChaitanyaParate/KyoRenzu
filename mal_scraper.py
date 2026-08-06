@@ -29,13 +29,15 @@ def setup_db():
                   genres TEXT,
                   image_url TEXT,
                   local_image_path TEXT,
-                  aired_from TEXT)''')
+                  aired_from TEXT,
+                  synopsis TEXT)''')
     
     # Try to add columns if they don't exist (for existing DBs)
     for col in [
         "ALTER TABLE anime ADD COLUMN title_english TEXT",
         "ALTER TABLE anime ADD COLUMN title_japanese TEXT",
         "ALTER TABLE anime ADD COLUMN aired_from TEXT",
+        "ALTER TABLE anime ADD COLUMN synopsis TEXT",
     ]:
         try:
             c.execute(col)
@@ -46,20 +48,30 @@ def setup_db():
 
 async def fetch_page(session, page, sem):
     async with sem:
-        while True:
+        retries = 5
+        for attempt in range(retries):
             # Respect Jikan rate limit: sleep before making request
             await asyncio.sleep(1.0 / API_RATE_LIMIT)
             url = f"{API_URL}?order_by=score&sort=desc&page={page}"
-            async with session.get(url) as response:
-                if response.status == 200:
-                    return await response.json()
-                elif response.status == 429:
-                    # Rate limit hit, wait and retry
-                    await asyncio.sleep(2)
-                    continue
-                else:
-                    print(f"Failed to fetch page {page}: Status {response.status}")
-                    return None
+            try:
+                async with session.get(url, timeout=15) as response:
+                    if response.status == 200:
+                        return await response.json()
+                    elif response.status in [429, 500, 502, 503, 504]:
+                        # Rate limit hit or server error, wait and retry
+                        print(f"Status {response.status} on page {page}. Retrying ({attempt+1}/{retries})...")
+                        await asyncio.sleep(2 * (attempt + 1))
+                        continue
+                    else:
+                        print(f"Failed to fetch page {page}: Status {response.status}")
+                        return None
+            except Exception as e:
+                print(f"Error fetching page {page}: {e}. Retrying ({attempt+1}/{retries})...")
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+                
+        print(f"Failed to fetch page {page} after {retries} attempts.")
+        return None
 
 async def scrape_metadata():
     conn = setup_db()
@@ -104,6 +116,7 @@ def process_page_data(anime_list, cursor, conn):
         score = anime.get('score')
         scored_by = anime.get('scored_by')
         members = anime.get('members')
+        synopsis = anime.get('synopsis')
         
         genres_list = [g.get('name') for g in anime.get('genres', [])]
         # Include MAL Themes (Isekai, Time Travel, Psychological, Military...)
@@ -126,12 +139,12 @@ def process_page_data(anime_list, cursor, conn):
             cursor.execute(
                 '''INSERT OR REPLACE INTO anime 
                    (mal_id, title, title_english, title_japanese, score, scored_by,
-                    members, genres, image_url, local_image_path, aired_from)
+                    members, genres, image_url, local_image_path, aired_from, synopsis)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
                            COALESCE((SELECT local_image_path FROM anime WHERE mal_id = ?), NULL),
-                           ?)''',
+                           ?, ?)''',
                 (mal_id, title, title_english, title_japanese, score, scored_by,
-                 members, genres, image_url, mal_id, aired_from)
+                 members, genres, image_url, mal_id, aired_from, synopsis)
             )
         except sqlite3.Error as e:
             print(f"DB Error on mal_id {mal_id}: {e}")

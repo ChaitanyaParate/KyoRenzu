@@ -42,14 +42,15 @@ def _build_gallery(results: list[Recommendation]) -> list[tuple]:
 
 def _build_table_md(results: list[Recommendation]) -> str:
     """Render results as a markdown table."""
-    header = "| # | Title | Score | Members | Genres | Visual Sim |\n"
-    header += "|---|---|---|---|---|---|\n"
+    header = "| # | Title | Score | Members | Genres | Visual Sim | Plot Sim |\n"
+    header += "|---|---|---|---|---|---|---|\n"
     rows = []
     for r in results:
         members = f"{r.members:,}"
         genres = r.genres or "—"
+        plot_sim_str = f"{r.plot_similarity:.3f}" if r.plot_similarity is not None else "—"
         rows.append(
-            f"| {r.rank} | **{r.title}** | ★ {r.score:.2f} | {members} | {genres} | {r.similarity:.3f} |"
+            f"| {r.rank} | **{r.title}** | ★ {r.score:.2f} | {members} | {genres} | {r.similarity:.3f} | {plot_sim_str} |"
         )
     return header + "\n".join(rows)
 
@@ -60,6 +61,7 @@ def run_recommendations(
     anime_input: str,
     csv_file,
     preference: str,
+    plot_preference: str,
     top_n: int,
     preferred_year: int | None = None,
 ) -> tuple:
@@ -115,9 +117,13 @@ def run_recommendations(
         n_candidates = max(top_n * 5, 150) + (len(genre_filter) * 50 if genre_filter else 0)
         # Over-fetch so the post-filter still leaves enough results
         fetch_n = top_n + len(liked_anime) + 50
+        
+        plot_pref_text = plot_preference.strip() if plot_preference else None
+        
         results = recommend(
             liked_anime=liked_anime,
             preference_text_embed=text_embedding,
+            plot_preference_text=plot_pref_text,
             genre_filter=genre_filter,
             era_year=era_year,
             top_n=fetch_n,
@@ -211,6 +217,11 @@ with gr.Blocks(
                 placeholder="dark psychological thriller  /  romance isekai  /  mind games",
                 lines=2,
             )
+            plot_preference = gr.Textbox(
+                label="Plot / Synopsis preference (optional)",
+                placeholder="relaxing slice of life about camping",
+                lines=2,
+            )
             top_n = gr.Slider(
                 minimum=3,
                 maximum=20,
@@ -249,21 +260,22 @@ with gr.Blocks(
     # ── Examples ──────────────────────────────────────────────────────────────
     gr.Examples(
         examples=[
-            ["Death Note, Code Geass, Monster", None, "dark psychological thriller", 6, None],
-            ["Attack on Titan, Demon Slayer, Jujutsu Kaisen", None, "action shounen", 8, None],
-            ["Clannad, Toradora, Your Lie in April", None, "romance drama", 6, None],
-            ["Sword Art Online, Re:Zero, Overlord", None, "Isekai action", 6, None],
-            ["Steins;Gate, Ergo Proxy, Psycho-Pass", None, "sci-fi psychological", 8, None],
-            ["Cowboy Bebop, Trigun, Rurouni Kenshin", None, "action adventure", 6, 1998],
+            ["Death Note, Code Geass, Monster", None, "dark psychological thriller", "", 6, None],
+            ["Attack on Titan, Demon Slayer, Jujutsu Kaisen", None, "action shounen", "", 8, None],
+            ["Clannad, Toradora, Your Lie in April", None, "romance drama", "", 6, None],
+            ["Sword Art Online, Re:Zero, Overlord", None, "Isekai action", "", 6, None],
+            ["Steins;Gate, Ergo Proxy, Psycho-Pass", None, "sci-fi psychological", "", 8, None],
+            ["Cowboy Bebop, Trigun, Rurouni Kenshin", None, "action adventure", "", 6, 1998],
+            ["Death Note", None, "", "relaxing slice of life", 6, None],
         ],
-        inputs=[anime_input, csv_file, preference, top_n, preferred_year_input],
+        inputs=[anime_input, csv_file, preference, plot_preference, top_n, preferred_year_input],
         label="Quick examples",
     )
 
     # ── Wire up ───────────────────────────────────────────────────────────────
     run_btn.click(
         fn=run_recommendations,
-        inputs=[anime_input, csv_file, preference, top_n, preferred_year_input],
+        inputs=[anime_input, csv_file, preference, plot_preference, top_n, preferred_year_input],
         outputs=[gallery, table, status_box],
     )
 
