@@ -38,8 +38,8 @@ W_VISUAL = 0.70  # user taste vector (visual similarity)
 W_TEXT = 0.30  # preference text embedding
 
 # Final score weights
-W_SIM = 0.45    # visual cover similarity
-W_PLOT = 0.20   # plot similarity (used if plot preference is given)
+W_SIM = 0.60    # visual cover similarity
+W_PLOT = 0.30   # plot similarity (used if plot preference is given)
 W_SCORE = 0.28  # MAL community score
 W_POP = 0.17    # MAL member count (popularity)
 W_GENRE = 0.25  # genre relevance (0 when no genre filter; 0→1 based on overlap fraction)
@@ -540,7 +540,7 @@ def recommend(
             syn_idx = _synopsis_index.get(str(mal_id))
             if syn_idx is not None:
                 plot_sim = float(plot_sims[syn_idx])
-                active_w_sim = 0.25  # reduce visual weight when plot is used
+                active_w_sim = W_SIM  # keep full visual weight as requested
                 active_w_plot = W_PLOT
 
         final = (active_w_sim * vis_sim + active_w_plot * plot_sim + W_SCORE * norm_score

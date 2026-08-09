@@ -7,7 +7,6 @@ models/
 
 # Pre-computed CLIP embeddings (59 MB) — generated via embed_covers.py
 cover_embeddings.npy
-embedding_index.json
 
 # SQLite database (8 MB) — generated via mal_scraper.py
 anime_data.db
@@ -49,5 +48,6 @@ Thumbs.db
 Ani.csv
 
 covers.zip
-genre_correlation.json
+*.npy
+
 

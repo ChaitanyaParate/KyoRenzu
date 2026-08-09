@@ -11,12 +11,14 @@ DB_NAME = "anime_data.db"
 COVERS_DIR = "covers"
 
 # APIs
-JIKAN_URL = "https://api.jikan.moe/v4/anime"
+KITSU_URL = "https://kitsu.io/api/edge"
 ANILIST_URL = "https://graphql.anilist.co"
+JIKAN_URL = "https://api.jikan.moe/v4/anime"
 
 # Limits
-JIKAN_RATE_LIMIT = 2
+KITSU_RATE_LIMIT = 5
 ANILIST_RATE_LIMIT = 1.2
+JIKAN_RATE_LIMIT = 2
 IMAGE_CONCURRENCY = 30
 MAX_RETRIES = 5
 
@@ -50,17 +52,17 @@ def setup_db():
     conn.commit()
     return conn
 
-# ----------------- PHASE 1: Scrape Base -----------------
-async def fetch_page(session, page, sem):
+# ----------------- PHASE 1: Scrape Base (via Kitsu) -----------------
+async def fetch_kitsu_page(session, offset, sem):
     async with sem:
         for attempt in range(MAX_RETRIES):
-            await asyncio.sleep(1.0 / JIKAN_RATE_LIMIT)
-            url = f"{JIKAN_URL}?order_by=score&sort=desc&page={page}"
+            await asyncio.sleep(1.0 / KITSU_RATE_LIMIT)
+            url = f"{KITSU_URL}/anime?sort=-averageRating&page[limit]=20&page[offset]={offset}&include=mappings"
             try:
-                async with session.get(url, timeout=15) as response:
+                async with session.get(url, headers={'Accept': 'application/vnd.api+json', 'User-Agent': 'Mozilla/5.0'}, timeout=15) as response:
                     if response.status == 200:
                         return await response.json()
-                    elif response.status in [429, 500, 502, 503, 504]:
+                    elif response.status == 429:
                         await asyncio.sleep(2 * (attempt + 1))
                         continue
                     else:
@@ -70,77 +72,93 @@ async def fetch_page(session, page, sem):
                 continue
         return None
 
-def process_page_data(anime_list, cursor, conn):
-    for anime in anime_list:
-        mal_id = anime.get('mal_id')
-        title = anime.get('title')
-        title_english = anime.get('title_english')
-        title_japanese = anime.get('title_japanese')
-        score = anime.get('score')
-        scored_by = anime.get('scored_by')
-        members = anime.get('members')
-        synopsis = anime.get('synopsis')
-        
-        genres_list = [g.get('name') for g in anime.get('genres', [])]
-        themes_list = [t.get('name') for t in anime.get('themes', [])]
-        demographics_list = [d.get('name') for d in anime.get('demographics', [])]
-        all_tags = genres_list + themes_list + demographics_list
-        genres = ", ".join(dict.fromkeys(all_tags))
-        
-        aired_from_raw = (anime.get('aired') or {}).get('from')
-        aired_from = aired_from_raw[:10] if aired_from_raw else None
+def process_kitsu_page_data(data_json, cursor, conn):
+    if not data_json or 'data' not in data_json:
+        return 0
+    
+    data = data_json.get('data', [])
+    included = data_json.get('included', [])
+    mappings_lookup = {item['id']: item for item in included if item['type'] == 'mappings'}
 
-        images = anime.get('images', {}).get('jpg', {})
-        image_url = images.get('large_image_url') or images.get('image_url')
+    inserted = 0
+    for anime in data:
+        attrs = anime.get('attributes', {})
+        
+        mal_id = None
+        relationships = anime.get('relationships', {})
+        mappings_ref = relationships.get('mappings', {}).get('data', [])
+        for m in mappings_ref:
+            mapping_item = mappings_lookup.get(m['id'])
+            if mapping_item and mapping_item.get('attributes', {}).get('externalSite') == 'myanimelist/anime':
+                mal_id_str = mapping_item['attributes'].get('externalId')
+                if mal_id_str and mal_id_str.isdigit():
+                    mal_id = int(mal_id_str)
+                break
+        
+        if not mal_id:
+            continue
+
+        title = attrs.get('canonicalTitle')
+        titles = attrs.get('titles', {})
+        title_english = titles.get('en') or titles.get('en_us')
+        title_japanese = titles.get('ja_jp')
+        
+        score_str = attrs.get('averageRating')
+        score = float(score_str) / 10.0 if score_str else None # Kitsu uses 0-100, MAL uses 0-10
+        members = attrs.get('userCount')
+        synopsis = attrs.get('synopsis')
+        
+        poster = attrs.get('posterImage') or {}
+        image_url = poster.get('original') or poster.get('large')
+
+        start_date = attrs.get('startDate')
 
         try:
-            # We use INSERT OR IGNORE so we don't overwrite enriched metadata on subsequent runs
             cursor.execute('''
                 INSERT OR IGNORE INTO anime 
-                (mal_id, title, title_english, title_japanese, score, scored_by,
-                 members, genres, image_url, local_image_path, aired_from, synopsis, data_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (mal_id, title, title_english, title_japanese, score, scored_by,
-                  members, genres, image_url, None, aired_from, synopsis, 'kaggle_base'))
+                (mal_id, title, title_english, title_japanese, score, members, image_url, aired_from, synopsis, data_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (mal_id, title, title_english, title_japanese, score, members, image_url, start_date, synopsis, 'kaggle_base'))
             
-            # If it already exists, update only the basic fields but preserve rich metadata
             cursor.execute('''
                 UPDATE anime SET
-                title = ?, title_english = ?, title_japanese = ?, score = ?, 
-                scored_by = ?, members = ?, genres = ?, image_url = ?, aired_from = ?
+                title = ?, title_english = ?, title_japanese = ?, score = ?, members = ?, image_url = ?, aired_from = ?
                 WHERE mal_id = ?
-            ''', (title, title_english, title_japanese, score, scored_by, members, genres, image_url, aired_from, mal_id))
+            ''', (title, title_english, title_japanese, score, members, image_url, start_date, mal_id))
+            inserted += 1
         except sqlite3.Error as e:
             print(f"DB Error on mal_id {mal_id}: {e}")
+            
+    return inserted
 
 async def scrape_base():
     conn = setup_db()
     c = conn.cursor()
-    print("Fetching first page to determine total pages...")
+    print("Starting Kitsu base discovery pipeline...")
+    
+    # We will fetch top 10000 anime (20 per page * 500 pages)
+    total_pages = 500
+    
     async with aiohttp.ClientSession() as session:
         api_sem = asyncio.Semaphore(1) 
-        first_page = await fetch_page(session, 1, api_sem)
-        if not first_page:
-            print("Could not fetch first page. Exiting.")
-            return
-
-        last_visible_page = first_page['pagination']['last_visible_page']
-        print(f"Total pages to scrape: {last_visible_page} (~{last_visible_page * 25} anime)")
         
-        process_page_data(first_page['data'], c, conn)
-
-        for page in tqdm(range(2, last_visible_page + 1), desc="Scraping Base Pages"):
-            data = await fetch_page(session, page, api_sem)
-            if data and 'data' in data:
-                process_page_data(data['data'], c, conn)
-            conn.commit()
+        with tqdm(total=total_pages, desc="Scraping Kitsu Pages") as pbar:
+            for page in range(total_pages):
+                offset = page * 20
+                data = await fetch_kitsu_page(session, offset, api_sem)
+                if data:
+                    process_kitsu_page_data(data, c, conn)
+                conn.commit()
+                pbar.update(1)
 
     conn.close()
     print("Base metadata scraping complete.")
     print("Rebuilding genre correlation table...")
-    _build_genre_correlation()
-    print("Genre correlation updated.")
-
+    try:
+        _build_genre_correlation()
+        print("Genre correlation updated.")
+    except Exception as e:
+        print(f"Skipping genre correlation build for now: {e}")
 
 # ----------------- PHASE 2: Enrich Metadata -----------------
 def clean_html(raw_html):
@@ -153,7 +171,7 @@ async def fetch_anilist(session, mal_id, sem):
     query = '''
     query ($idMal: Int) {
       Media(idMal: $idMal, type: ANIME) {
-        id description episodes seasonYear season status
+        id description episodes seasonYear season status genres
         studios(isMain: true) { nodes { name } }
       }
     }
@@ -173,6 +191,9 @@ async def fetch_anilist(session, mal_id, sem):
                         studios = media.get('studios', {}).get('nodes', [])
                         studio = studios[0].get('name') if studios else None
                         
+                        genres = media.get('genres', [])
+                        genres_str = ", ".join(genres) if genres else None
+                        
                         return {
                             'anilist_id': media.get('id'),
                             'synopsis': desc,
@@ -181,6 +202,7 @@ async def fetch_anilist(session, mal_id, sem):
                             'season': media.get('season'),
                             'status': media.get('status'),
                             'studio': studio,
+                            'genres': genres_str,
                             'data_source': 'anilist'
                         }
                     elif response.status == 404:
@@ -215,6 +237,7 @@ async def fetch_jikan(session, mal_id, sem):
                             'season': anime.get('season'),
                             'status': anime.get('status'),
                             'studio': studio,
+                            'genres': None, # Jikan genres are handled differently or skipped here
                             'data_source': 'jikan'
                         }
                     elif response.status == 404:
@@ -229,7 +252,64 @@ async def fetch_jikan(session, mal_id, sem):
                 continue
         return None
 
-async def tiered_fetch(session, mal_id, anilist_sem, jikan_sem):
+async def fetch_kitsu(session, mal_id, sem):
+    async with sem:
+        for attempt in range(MAX_RETRIES):
+            await asyncio.sleep(1.0 / KITSU_RATE_LIMIT)
+            url = f"{KITSU_URL}/mappings?filter[externalSite]=myanimelist/anime&filter[externalId]={mal_id}&include=item"
+            try:
+                async with session.get(url, headers={'Accept': 'application/vnd.api+json', 'User-Agent': 'Mozilla/5.0'}, timeout=15) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        included = data.get('included', [])
+                        if not included:
+                            return None
+                        
+                        attrs = included[0].get('attributes', {})
+                        desc = attrs.get('synopsis')
+                        if not desc:
+                            return None
+
+                        start_date = attrs.get('startDate')
+                        year = int(start_date[:4]) if start_date and len(start_date) >= 4 else None
+                        month = int(start_date[5:7]) if start_date and len(start_date) >= 7 else None
+                        season = None
+                        if month:
+                            if month in [12, 1, 2]: season = "WINTER"
+                            elif month in [3, 4, 5]: season = "SPRING"
+                            elif month in [6, 7, 8]: season = "SUMMER"
+                            elif month in [9, 10, 11]: season = "FALL"
+
+                        status_map = {
+                            'finished': 'FINISHED',
+                            'current': 'RELEASING',
+                            'tba': 'NOT_YET_RELEASED',
+                            'unreleased': 'NOT_YET_RELEASED',
+                            'upcoming': 'NOT_YET_RELEASED'
+                        }
+                        
+                        return {
+                            'anilist_id': None,
+                            'synopsis': desc,
+                            'episodes': attrs.get('episodeCount'),
+                            'year': year,
+                            'season': season,
+                            'status': status_map.get(attrs.get('status'), attrs.get('status')),
+                            'studio': None,
+                            'genres': None,
+                            'data_source': 'kitsu'
+                        }
+                    elif response.status == 429:
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    else:
+                        return None
+            except Exception:
+                await asyncio.sleep(2 ** attempt)
+                continue
+        return None
+
+async def tiered_fetch(session, mal_id, anilist_sem, jikan_sem, kitsu_sem):
     res = await fetch_anilist(session, mal_id, anilist_sem)
     if res and res.get('synopsis'):
         return mal_id, res
@@ -237,12 +317,16 @@ async def tiered_fetch(session, mal_id, anilist_sem, jikan_sem):
     res = await fetch_jikan(session, mal_id, jikan_sem)
     if res and res.get('synopsis'):
         return mal_id, res
+
+    res = await fetch_kitsu(session, mal_id, kitsu_sem)
+    if res and res.get('synopsis'):
+        return mal_id, res
     
     return mal_id, {'data_source': 'none'}
 
-async def process_batch_enrich(session, records, conn, c, anilist_sem, jikan_sem, pbar):
+async def process_batch_enrich(session, records, conn, c, anilist_sem, jikan_sem, kitsu_sem, pbar):
     async def fetch_and_update(mal_id):
-        res = await tiered_fetch(session, mal_id, anilist_sem, jikan_sem)
+        res = await tiered_fetch(session, mal_id, anilist_sem, jikan_sem, kitsu_sem)
         pbar.update(1)
         return res
 
@@ -250,6 +334,7 @@ async def process_batch_enrich(session, records, conn, c, anilist_sem, jikan_sem
     results = await asyncio.gather(*tasks)
         
     updates = []
+    genre_updates = []
     for mal_id, data in results:
         if data.get('data_source') == 'none':
             updates.append((None, None, None, None, None, None, None, 'none', mal_id))
@@ -259,6 +344,8 @@ async def process_batch_enrich(session, records, conn, c, anilist_sem, jikan_sem
                 data.get('year'), data.get('season'), data.get('status'),
                 data.get('studio'), data.get('data_source'), mal_id
             ))
+            if data.get('genres'):
+                genre_updates.append((data.get('genres'), mal_id))
             
     if updates:
         c.executemany('''
@@ -267,7 +354,13 @@ async def process_batch_enrich(session, records, conn, c, anilist_sem, jikan_sem
                 season = ?, status = ?, studio = ?, data_source = ?
             WHERE mal_id = ?
         ''', updates)
-        conn.commit()
+        
+    if genre_updates:
+        c.executemany('''
+            UPDATE anime SET genres = ? WHERE mal_id = ? AND (genres IS NULL OR genres = '')
+        ''', genre_updates)
+        
+    conn.commit()
 
 async def enrich_metadata(limit=None):
     conn = sqlite3.connect(DB_NAME)
@@ -286,47 +379,65 @@ async def enrich_metadata(limit=None):
     print(f"Starting tiered pipeline to enrich {len(records)} anime...")
     anilist_sem = asyncio.Semaphore(1)
     jikan_sem = asyncio.Semaphore(1)
+    kitsu_sem = asyncio.Semaphore(1)
     
     batch_size = 50
     async with aiohttp.ClientSession() as session:
         with tqdm(total=len(records), desc="Tiered Fetch") as pbar:
             for i in range(0, len(records), batch_size):
                 batch_records = records[i:i+batch_size]
-                await process_batch_enrich(session, batch_records, conn, c, anilist_sem, jikan_sem, pbar)
+                await process_batch_enrich(session, batch_records, conn, c, anilist_sem, jikan_sem, kitsu_sem, pbar)
 
     conn.close()
     print("Metadata enrichment complete!")
 
 
 # ----------------- PHASE 3: Download Covers -----------------
+async def get_kitsu_cover_url(session, mal_id):
+    url = f"{KITSU_URL}/mappings?filter[externalSite]=myanimelist/anime&filter[externalId]={mal_id}&include=item"
+    try:
+        async with session.get(url, headers={'Accept': 'application/vnd.api+json', 'User-Agent': 'Mozilla/5.0'}, timeout=15) as response:
+            if response.status == 200:
+                data = await response.json()
+                included = data.get('included', [])
+                if included:
+                    poster = included[0].get('attributes', {}).get('posterImage') or {}
+                    return poster.get('original') or poster.get('large')
+    except Exception:
+        pass
+    return None
+
 async def download_image(session, sem, mal_id, image_url, pbar):
     async with sem:
-        if not image_url:
-            pbar.update(1)
-            return mal_id, None
-            
-        ext = image_url.split('.')[-1]
-        local_path = os.path.join(COVERS_DIR, f"{mal_id}.{ext}")
-        
-        if os.path.exists(local_path):
+        local_path = os.path.join(COVERS_DIR, f"{mal_id}.jpg")
+        if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
             pbar.update(1)
             return mal_id, local_path
 
+        urls_to_try = [image_url] if image_url else []
+
         for attempt in range(MAX_RETRIES):
+            if not urls_to_try:
+                # Fallback to fetching fresh URL from Kitsu
+                fallback_url = await get_kitsu_cover_url(session, mal_id)
+                if fallback_url:
+                    urls_to_try.append(fallback_url)
+                else:
+                    break
+                    
+            current_url = urls_to_try[0]
             try:
-                await asyncio.sleep(1.5)
-                async with session.get(image_url, timeout=15) as response:
+                await asyncio.sleep(1.0)
+                async with session.get(current_url, timeout=15) as response:
                     if response.status == 200:
                         content = await response.read()
                         with open(local_path, 'wb') as f:
                             f.write(content)
                         pbar.update(1)
                         return mal_id, local_path
-                    elif response.status in [429, 403]:
-                        await asyncio.sleep(2 * (attempt + 1))
+                    elif response.status in [429, 403, 404]:
+                        urls_to_try.pop(0) # URL is dead, try fallback next loop
                         continue
-                    else:
-                        break
             except Exception:
                 await asyncio.sleep(1)
                 continue
@@ -364,9 +475,9 @@ async def download_covers():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MyAnimeList Universal Scraper")
-    parser.add_argument("--scrape-base", action="store_true", help="Scrape top anime base metadata from Jikan API")
-    parser.add_argument("--enrich-metadata", action="store_true", help="Fetch detailed metadata/synopses via AniList->Jikan tiered pipeline")
-    parser.add_argument("--download-covers", action="store_true", help="Download missing cover images locally")
+    parser.add_argument("--scrape-base", action="store_true", help="Scrape top anime base metadata from Kitsu API")
+    parser.add_argument("--enrich-metadata", action="store_true", help="Fetch detailed metadata/synopses via AniList->Jikan->Kitsu tiered pipeline")
+    parser.add_argument("--download-covers", action="store_true", help="Download missing cover images locally with Kitsu fallback")
     parser.add_argument("--all", action="store_true", help="Run the entire pipeline (Base -> Enrich -> Covers)")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of items processed in enrichment phase")
     args = parser.parse_args()
