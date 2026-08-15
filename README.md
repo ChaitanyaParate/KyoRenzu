@@ -204,9 +204,23 @@ python gui.py
 
 ---
 
-## 📁 Input Format
+## 📂 Input Format
 
-### CSV / Excel Watchlist
+### 1. Direct URL Import (Recommended)
+
+You can paste a public MyAnimeList or AniList profile URL directly. The engine will instantly fetch your anime list and use your personal scores to precisely weight your visual taste vector.
+
+```bash
+# MyAnimeList
+python recommend.py --input "https://myanimelist.net/profile/Xinil" --preference "dark psychological thriller"
+
+# AniList
+python recommend.py --input "https://anilist.co/user/AWC" --preference "relaxing slice of life"
+```
+
+*Note: The engine natively excludes all anime you have on your imported list from the final recommendations.*
+
+### 2. CSV / Excel Watchlist
 
 Your file should have a column named `anime`, `title`, `name`, or `show`. Optionally add a `Worth Level` column:
 
@@ -220,7 +234,7 @@ Your file should have a column named `anime`, `title`, `name`, or `show`. Option
 
 Titles are fuzzy-matched using `rapidfuzz.WRatio` so minor typos, alternate romanizations, and partial titles are handled gracefully.
 
-### Terminal / Inline Input
+### 3. Terminal / Inline Input
 
 ```bash
 python recommend.py --input "Naruto, Bleach, One Piece" --preference "long shonen epic"
@@ -435,10 +449,11 @@ For each anime with data_source = 'kaggle_base':
 
 | data_source | Count | Description |
 |---|---|---|
-| `anilist` | ~19,477 | Full synopsis + rich metadata via AniList |
-| `jikan` | ~13 | Fetched via Jikan during stable windows |
-| `none` | ~8,047 | Obscure entries not indexed by AniList or Jikan |
-| `kaggle_base` | ~2,534 | Pending enrichment |
+| `anilist` | ~19,479 | Full synopsis + rich metadata via AniList |
+| `kitsu` | ~2,949 | Obscure entries salvaged via Kitsu fallback |
+| `jikan` | ~13 | Legacy entries fetched via Jikan |
+| `kaggle_base` | ~666 | Pending enrichment |
+| `none` | ~7,013 | Extremely obscure entries with no metadata on any API |
 
 After any data updates, regenerate the embeddings:
 
@@ -459,7 +474,8 @@ python embed_synopsis.py
 | **[CLIP (ViT-Large/14)](https://github.com/openai/CLIP)** | Visual + text embedding backbone (768-d) |
 | **[all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)** | Semantic synopsis embedding (384-d, SentenceTransformers) |
 | **[AniList GraphQL API](https://anilist.gitbook.io/anilist-apiv2-docs/)** | Primary metadata source (synopsis, studio, season) |
-| **[Jikan API](https://jikan.moe)** | Fallback metadata source (unofficial MAL REST API) |
+| **[Kitsu API](https://kitsu.docs.apiary.io/)** | Primary discovery engine & fallback metadata |
+| **[Jikan API](https://jikan.moe)** | Legacy fallback metadata source (unofficial MAL REST API) |
 | **[Gradio](https://gradio.app)** | Web GUI framework |
 | **NumPy** | Batched cosine similarity over 30k embeddings |
 | **[rapidfuzz](https://github.com/maxbachmann/RapidFuzz)** | Fuzzy title matching for input parsing |
@@ -474,10 +490,10 @@ python embed_synopsis.py
 
 | | Details |
 |---|---|
-| Anime in DB | 30,071 |
-| Anime with cover images | ~30,000 JPEGs |
-| Anime with synopses | ~19,490 |
-| Anime with plot embeddings | 19,490 (384-d vectors) |
+| Anime in DB | 30,120 |
+| Anime with cover images | 30,120 JPEGs |
+| Anime with synopses | ~22,483 |
+| Anime with plot embeddings | 22,562 (384-d vectors) |
 | Cover embedding size | 88 MB (`cover_embeddings.npy`) |
 | Synopsis embedding size | 28 MB (`synopsis_embeddings.npy`) |
 | Database size | ~30 MB (`anime_data.db`) |

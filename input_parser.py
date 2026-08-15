@@ -8,6 +8,8 @@ import sqlite3
 import pandas as pd
 from rapidfuzz import process, fuzz
 from typing import NamedTuple
+import re
+import requests
 
 DB_PATH = "anime_data.db"
 FUZZY_THRESHOLD = 82  # min score to accept a match (0–100)
@@ -69,6 +71,9 @@ WORTH_WEIGHTS: dict[str, float] = {
     "medium": 1.0,
     "low": 0.3,
 }
+
+MAL_URL_PATTERN = r"(?:https?://)?myanimelist\.net/(?:animelist|profile)/([^/?#]+)"
+ANILIST_URL_PATTERN = r"(?:https?://)?anilist\.co/user/([^/?#]+)"
 
 
 class AnimeEntry(NamedTuple):
@@ -322,14 +327,145 @@ def _resolve_titles_weighted(title_weight_pairs: list[tuple[str, float]]) -> lis
     return results
 
 
+def _fetch_mal_user_list(username: str) -> list[tuple[int, float]]:
+    """Fetch user's list from MyAnimeList and return (mal_id, weight) pairs."""
+    print(f"  [input_parser] Fetching MyAnimeList profile for '{username}'...")
+    results = []
+    offset = 0
+    while True:
+        url = f"https://myanimelist.net/animelist/{username}/load.json?status=7&offset={offset}"
+        try:
+            res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+            if res.status_code != 200:
+                print(f"  [input_parser] WARNING: Failed to fetch MAL list (Status: {res.status_code})")
+                break
+            
+            data = res.json()
+            if not data:
+                break
+                
+            for item in data:
+                mal_id = item.get("anime_id")
+                score = item.get("score", 0)
+                if not mal_id:
+                    continue
+                    
+                # Map score to weight
+                if score == 0:
+                    weight = 1.0
+                elif score >= 8:
+                    weight = 1.5
+                elif score >= 5:
+                    weight = 1.0
+                else:
+                    weight = 0.3
+                    
+                results.append((mal_id, weight))
+                
+            offset += 300
+        except Exception as e:
+            print(f"  [input_parser] ERROR fetching MAL list: {e}")
+            break
+            
+    print(f"  [input_parser] Extracted {len(results)} anime from MAL profile.")
+    return results
+
+def _fetch_anilist_user_list(username: str) -> list[tuple[int, float]]:
+    """Fetch user's list from AniList and return (mal_id, weight) pairs."""
+    print(f"  [input_parser] Fetching AniList profile for '{username}'...")
+    query = '''
+    query ($userName: String) {
+      MediaListCollection(userName: $userName, type: ANIME) {
+        lists {
+          entries {
+            score
+            media {
+              idMal
+            }
+          }
+        }
+      }
+    }
+    '''
+    results = []
+    url = 'https://graphql.anilist.co'
+    try:
+        res = requests.post(url, json={'query': query, 'variables': {'userName': username}}, 
+                            headers={'Content-Type': 'application/json', 'Accept': 'application/json'}, timeout=10)
+        if res.status_code != 200:
+            print(f"  [input_parser] WARNING: Failed to fetch AniList profile (Status: {res.status_code})")
+            return results
+            
+        data = res.json().get('data', {}).get('MediaListCollection', {}).get('lists', [])
+        for lst in data:
+            for entry in lst.get('entries', []):
+                media = entry.get('media', {})
+                if not media: continue
+                mal_id = media.get('idMal')
+                if not mal_id: continue
+                
+                score = entry.get('score', 0)
+                
+                # Normalize AniList scores (handles 100-pt, 10-pt, and 5-star)
+                if score == 0:
+                    weight = 1.0
+                elif score > 10:  # 100-point scale
+                    if score >= 80: weight = 1.5
+                    elif score >= 50: weight = 1.0
+                    else: weight = 0.3
+                else:  # 10-point or 5-star
+                    if score >= 8.0 or (0 < score <= 5.0 and score >= 4.0): weight = 1.5
+                    elif score >= 5.0 or (0 < score <= 5.0 and score >= 2.5): weight = 1.0
+                    else: weight = 0.3
+                    
+                results.append((mal_id, weight))
+                
+    except Exception as e:
+        print(f"  [input_parser] ERROR fetching AniList profile: {e}")
+        
+    print(f"  [input_parser] Extracted {len(results)} anime from AniList profile.")
+    return results
+
+def _resolve_by_id_weights(id_weight_pairs: list[tuple[int, float]]) -> list[AnimeEntry]:
+    """Resolve (mal_id, weight) pairs from URL imports."""
+    title_map = _load_title_map()
+    results = []
+    for mid, weight in id_weight_pairs:
+        if mid in title_map:
+            info = title_map[mid]
+            results.append(AnimeEntry(
+                mal_id=mid,
+                title=info["title"],
+                title_english=info["title_english"],
+                title_japanese=info["title_japanese"],
+                genres=info["genres"],
+                score=info["score"],
+                local_image_path=info["local_image_path"],
+                weight=weight,
+            ))
+    return results
+
+
 def auto_parse(source: str) -> list[AnimeEntry]:
     """
     Auto-detect input type from the source string:
+    - URL → MAL or AniList profile fetch
     - Ends with .csv → CSV file
     - Ends with .xlsx or .xls → Excel file
     - Otherwise → treat as comma-separated terminal input
     """
     sl = source.strip().lower()
+    
+    mal_match = re.search(MAL_URL_PATTERN, sl)
+    if mal_match:
+        id_weights = _fetch_mal_user_list(mal_match.group(1))
+        return _resolve_by_id_weights(id_weights)
+        
+    anilist_match = re.search(ANILIST_URL_PATTERN, sl)
+    if anilist_match:
+        id_weights = _fetch_anilist_user_list(anilist_match.group(1))
+        return _resolve_by_id_weights(id_weights)
+        
     if sl.endswith(".csv"):
         return parse_csv(source.strip())
     elif sl.endswith(".xlsx") or sl.endswith(".xls"):
@@ -346,6 +482,10 @@ def get_all_raw_titles(source: str) -> list[str]:
     Returns a flat list of lowercased title strings.
     """
     sl = source.strip().lower()
+
+    # URLs don't have raw titles; the ID filtering natively excludes them all anyway
+    if re.search(MAL_URL_PATTERN, sl) or re.search(ANILIST_URL_PATTERN, sl):
+        return []
 
     if sl.endswith(".csv"):
         df = pd.read_csv(source.strip())
