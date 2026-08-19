@@ -14,11 +14,13 @@ COVERS_DIR = "covers"
 KITSU_URL = "https://kitsu.io/api/edge"
 ANILIST_URL = "https://graphql.anilist.co"
 JIKAN_URL = "https://api.jikan.moe/v4/anime"
+ANIMETHEMES_URL = "https://api.animethemes.moe/anime"
 
 # Limits
 KITSU_RATE_LIMIT = 5
 ANILIST_RATE_LIMIT = 1.2
 JIKAN_RATE_LIMIT = 2
+ANIMETHEMES_RATE_LIMIT = 2
 IMAGE_CONCURRENCY = 30
 MAX_RETRIES = 5
 
@@ -309,7 +311,53 @@ async def fetch_kitsu(session, mal_id, sem):
                 continue
         return None
 
-async def tiered_fetch(session, mal_id, anilist_sem, jikan_sem, kitsu_sem):
+async def fetch_animethemes(session, mal_id, sem):
+    async with sem:
+        for attempt in range(MAX_RETRIES):
+            await asyncio.sleep(1.0 / ANIMETHEMES_RATE_LIMIT)
+            url = f"{ANIMETHEMES_URL}?filter[site]=MyAnimeList&filter[external_id]={mal_id}"
+            try:
+                async with session.get(url, timeout=15) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        anime_list = data.get('anime', [])
+                        if not anime_list:
+                            return None
+                        
+                        attrs = anime_list[0]
+                        desc = attrs.get('synopsis')
+                        if not desc:
+                            return None
+
+                        season_str = attrs.get('season')
+                        season = season_str.upper() if season_str else None
+                        
+                        return {
+                            'anilist_id': None,
+                            'synopsis': desc,
+                            'episodes': None,
+                            'year': attrs.get('year'),
+                            'season': season,
+                            'status': None,
+                            'studio': None,
+                            'genres': None,
+                            'data_source': 'animethemes'
+                        }
+                    elif response.status == 429:
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    else:
+                        return None
+            except Exception:
+                await asyncio.sleep(2 ** attempt)
+                continue
+        return None
+
+async def tiered_fetch(session, mal_id, anilist_sem, jikan_sem, kitsu_sem, animethemes_sem):
+    res = await fetch_animethemes(session, mal_id, animethemes_sem)
+    if res and res.get('synopsis'):
+        return mal_id, res
+
     res = await fetch_anilist(session, mal_id, anilist_sem)
     if res and res.get('synopsis'):
         return mal_id, res
@@ -324,9 +372,9 @@ async def tiered_fetch(session, mal_id, anilist_sem, jikan_sem, kitsu_sem):
     
     return mal_id, {'data_source': 'none'}
 
-async def process_batch_enrich(session, records, conn, c, anilist_sem, jikan_sem, kitsu_sem, pbar):
+async def process_batch_enrich(session, records, conn, c, anilist_sem, jikan_sem, kitsu_sem, animethemes_sem, pbar):
     async def fetch_and_update(mal_id):
-        res = await tiered_fetch(session, mal_id, anilist_sem, jikan_sem, kitsu_sem)
+        res = await tiered_fetch(session, mal_id, anilist_sem, jikan_sem, kitsu_sem, animethemes_sem)
         pbar.update(1)
         return res
 
@@ -380,13 +428,14 @@ async def enrich_metadata(limit=None):
     anilist_sem = asyncio.Semaphore(1)
     jikan_sem = asyncio.Semaphore(1)
     kitsu_sem = asyncio.Semaphore(1)
+    animethemes_sem = asyncio.Semaphore(1)
     
     batch_size = 50
     async with aiohttp.ClientSession() as session:
         with tqdm(total=len(records), desc="Tiered Fetch") as pbar:
             for i in range(0, len(records), batch_size):
                 batch_records = records[i:i+batch_size]
-                await process_batch_enrich(session, batch_records, conn, c, anilist_sem, jikan_sem, kitsu_sem, pbar)
+                await process_batch_enrich(session, batch_records, conn, c, anilist_sem, jikan_sem, kitsu_sem, animethemes_sem, pbar)
 
     conn.close()
     print("Metadata enrichment complete!")
@@ -476,7 +525,7 @@ async def download_covers():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MyAnimeList Universal Scraper")
     parser.add_argument("--scrape-base", action="store_true", help="Scrape top anime base metadata from Kitsu API")
-    parser.add_argument("--enrich-metadata", action="store_true", help="Fetch detailed metadata/synopses via AniList->Jikan->Kitsu tiered pipeline")
+    parser.add_argument("--enrich-metadata", action="store_true", help="Fetch detailed metadata/synopses via AnimeThemes->AniList->Jikan->Kitsu tiered pipeline")
     parser.add_argument("--download-covers", action="store_true", help="Download missing cover images locally with Kitsu fallback")
     parser.add_argument("--all", action="store_true", help="Run the entire pipeline (Base -> Enrich -> Covers)")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of items processed in enrichment phase")
