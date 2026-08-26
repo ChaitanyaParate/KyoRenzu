@@ -10,6 +10,7 @@ cover_embeddings.npy
 
 # SQLite database (8 MB) — generated via mal_scraper.py
 anime_data.db
+user_library.db
 
 # ── Output & logs ─────────────────────────────────────────────────────────────
 results/
@@ -21,6 +22,11 @@ nohup.out
 venv/
 __pycache__/
 *.py[cod]
+
+# ── Frontend environment ──────────────────────────────────────────────────────
+web/node_modules/
+web/dist/
+.env.local
 *.pyo
 .Python
 *.egg-info/

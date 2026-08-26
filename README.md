@@ -16,7 +16,7 @@ A **multimodal AI anime recommendation engine** that combines **OpenAI CLIP visu
 | 📅 Era Proximity Scoring | Gaussian decay rewards candidates close to your preferred release year |
 | ⭐ Worth Level Weighting | High-rated entries in your watchlist influence the query 1.5× more |
 | 🔍 Tiered Metadata Pipeline | AniList GraphQL → Jikan fallback for robust metadata collection |
-| 🖥️ Web GUI | Gradio browser interface with cover gallery output |
+| 🖥️ High-Fidelity Web UI | React/Vite frontend (Anikoto clone) and FastAPI backend for browsing and searching |
 | 📊 CSV / Excel input | Parses your exported watchlist file automatically |
 
 ---
@@ -76,26 +76,22 @@ The top results are post-filtered to exclude any anime already in your input wat
 ## 🚀 Quick Demo
 
 ```bash
+# Start the full web application (FastAPI Backend + React Frontend)
+./start.sh
+
+# The application will be available at:
+# Frontend: http://localhost:5173
+# API Docs: http://localhost:8000/docs
+```
+
+Or you can use the CLI tool directly:
+
+```bash
 # Simple visual match from a CSV watchlist
 python recommend.py --input Ani.csv
 
 # Add a mood/aesthetic preference
 python recommend.py --input Ani.csv --preference "dark psychological thriller"
-
-# Combine visual taste + plot preference (DUAL-VECTOR MODE)
-python recommend.py --input "Death Note, Code Geass" --plot-preference "a relaxing slice of life about school"
-
-# Use EVERY flag at once
-python recommend.py \
-  --input Ani.csv \
-  --preference "colorful and vibrant" \
-  --plot-preference "relaxing slice of life anime about school" \
-  --top-n 10 \
-  --candidates 500 \
-  --year 2018
-
-# Web GUI (opens in browser at http://localhost:7860)
-python gui.py
 ```
 
 ### Sample Output (Dual-Vector Mode)
@@ -200,6 +196,50 @@ python recommend.py --input "Attack on Titan, Death Note" --preference "dark act
 # Web GUI
 python gui.py
 # → open http://localhost:7860
+```
+
+---
+
+## 🔍 The Multi-Modal Search Engine
+
+This engine allows you to search across **three different modalities** simultaneously. You can use any combination of these flags:
+
+| Flag | Modality | Description | Example |
+|------|----------|-------------|---------|
+| `--preference` (`-p`) | **Visual** | Searches by cover art aesthetics, and auto-extracts genres and era keywords. | `-p "dark psychological 90s thriller"` |
+| `--plot-preference` | **Semantic** | Searches by matching your prompt against the actual plot synopsis of the anime. | `--plot-preference "a story about space bounty hunters"` |
+| `--audio-preference` (`-a`) | **Audio** | Searches by the actual sound of the anime's Opening/Ending theme song via CLAP embeddings. | `-a "epic jazz trumpet"` |
+
+### Combination Examples
+
+**1. The "Vibes" Search (URL Import + Visual + Audio)**
+Import your entire MyAnimeList profile, then find anime that *look* dark but *sound* jazzy:
+```bash
+python recommend.py -i "https://myanimelist.net/profile/Xinil" -p "dark neo-noir" -a "smooth jazz saxophone"
+```
+
+**2. The Hyper-Specific Search (CSV Watchlist + Plot + Audio + Era)**
+Pass in your local CSV/Excel list, and find a 2018 anime about camping with a relaxing acoustic theme song:
+```bash
+python recommend.py -i my_watchlist.csv --plot-preference "relaxing slice of life about camping" -a "calm acoustic guitar" -y 2018
+```
+
+**3. The Implicit Taste Search (Manual Listing)**
+Manually list out anime you like, and let the engine build a "Taste Vector" based entirely on their visual aesthetics and theme songs. This finds shows that naturally match your historical taste without any text prompts:
+```bash
+python recommend.py -i "Cowboy Bebop, Samurai Champloo, Baccano!"
+```
+
+**4. The Director's Cut (Manual Listing + Plot)**
+Combine a manual string input with a plot search to find something visually similar to Ghibli, but with a specific story:
+```bash
+python recommend.py -i "Spirited Away, Princess Mononoke" --plot-preference "a story about a flying castle"
+```
+
+**5. High-Candidate Broad Search (Excel Watchlist + Visual)**
+If you want to cast a wider net before filtering down, use an Excel file and increase the `--candidates` pool to 1000, requesting the top 10 results:
+```bash
+python recommend.py -i my_list.xlsx -p "colorful fantasy world" --candidates 1000 -n 10
 ```
 
 ---

@@ -33,13 +33,18 @@ SYNOPSIS_EMBEDDINGS_PATH = "synopsis_embeddings.npy"
 SYNOPSIS_INDEX_PATH = "synopsis_index.json"
 SYNOPSIS_MODEL_NAME = "all-MiniLM-L6-v2"
 
+AUDIO_EMBEDDINGS_PATH = "themes/audio_embeddings.npy"
+AUDIO_INDEX_PATH = "themes/audio_index.json"
+AUDIO_MODEL_NAME = "laion/clap-htsat-unfused"
+
 # Blending weights
 W_VISUAL = 0.70  # user taste vector (visual similarity)
 W_TEXT = 0.30  # preference text embedding
 
 # Final score weights
-W_SIM = 0.60    # visual cover similarity
+W_SIM = 0.50    # visual cover similarity
 W_PLOT = 0.30   # plot similarity (used if plot preference is given)
+W_AUDIO = 0.10  # audio theme similarity
 W_SCORE = 0.28  # MAL community score
 W_POP = 0.17    # MAL member count (popularity)
 W_GENRE = 0.25  # genre relevance (0 when no genre filter; 0→1 based on overlap fraction)
@@ -80,6 +85,20 @@ _device = None
 # ── Lazy SentenceTransformer loader ───────────────────────────────────────────
 _st_model = None
 
+# ── Lazy CLAP loader ──────────────────────────────────────────────────────────
+_clap_model = None
+_clap_processor = None
+
+def _get_clap():
+    global _clap_model, _clap_processor, _device
+    if _clap_model is None:
+        from transformers import ClapModel, ClapProcessor
+        _device = "cuda" if torch.cuda.is_available() else "cpu"
+        _clap_model = ClapModel.from_pretrained(AUDIO_MODEL_NAME).to(_device)
+        _clap_processor = ClapProcessor.from_pretrained(AUDIO_MODEL_NAME)
+        _clap_model.eval()
+    return _clap_model, _clap_processor, _device
+
 def _get_st_model():
     global _st_model
     if _st_model is None:
@@ -111,6 +130,21 @@ _reverse_index: dict | None = None  # row_idx → mal_id
 _genre_corr: dict | None = None     # (anime_genre, requested_genre) → float 0-1
 _synopsis_matrix: np.ndarray | None = None
 _synopsis_index: dict | None = None
+_audio_matrix: np.ndarray | None = None
+_audio_index: dict | None = None
+
+def _load_audio_index():
+    global _audio_matrix, _audio_index
+    if _audio_matrix is not None:
+        return
+    if not os.path.exists(AUDIO_EMBEDDINGS_PATH) or not os.path.exists(AUDIO_INDEX_PATH):
+        print("  [recommender] WARNING: Audio index not found. Audio similarity will be disabled.")
+        _audio_matrix = np.array([])
+        _audio_index = {}
+        return
+    _audio_matrix = np.load(AUDIO_EMBEDDINGS_PATH)
+    with open(AUDIO_INDEX_PATH, "r") as f:
+        _audio_index = json.load(f)
 
 def _load_synopsis_index():
     global _synopsis_matrix, _synopsis_index
@@ -308,6 +342,7 @@ class Recommendation(NamedTuple):
     local_image_path: str | None
     similarity: float
     plot_similarity: float | None
+    audio_similarity: float | None
     final_score: float
 
 
@@ -316,6 +351,7 @@ def recommend(
     liked_anime: list[AnimeEntry],
     preference_text_embed: np.ndarray | None = None,
     plot_preference_text: str | None = None,
+    audio_preference_text: str | None = None,
     genre_filter: set[str] | None = None,
     era_year: int | None = None,
     top_n: int = 6,
@@ -410,6 +446,42 @@ def recommend(
         st_model = _get_st_model()
         plot_query = st_model.encode([plot_preference_text], normalize_embeddings=True)[0]
         plot_sims = _cosine_sim(plot_query, _synopsis_matrix)
+
+    # ── 4c. Audio similarity ──────────────────────────────────────────────────
+    _load_audio_index()
+    audio_sims = None
+    neutral_audio_sim = 0.0
+    if _audio_matrix is not None and _audio_matrix.size > 0:
+        audio_query_vec = None
+        
+        if audio_preference_text:
+            c_model, c_processor, c_device = _get_clap()
+            inputs = c_processor(text=[audio_preference_text], return_tensors="pt")
+            inputs = {k: v.to(c_device) for k, v in inputs.items()}
+            with torch.no_grad():
+                text_features = c_model.get_text_features(**inputs)
+                if hasattr(text_features, "pooler_output"):
+                    # For CLAP, get_text_features returns BaseModelOutputWithPooling where pooler_output is the 512-dim projection
+                    text_embeds = text_features.pooler_output
+                else:
+                    text_embeds = text_features
+            audio_query_vec = text_embeds[0].cpu().numpy()
+            audio_query_vec = audio_query_vec / (np.linalg.norm(audio_query_vec) + 1e-9)
+        else:
+            # Build audio taste vector from liked anime
+            audio_liked_vecs = []
+            for entry in liked_anime:
+                key = str(entry.mal_id)
+                if key in _audio_index:
+                    audio_liked_vecs.append(_audio_matrix[_audio_index[key]])
+            if audio_liked_vecs:
+                audio_query_vec = np.mean(audio_liked_vecs, axis=0)
+                audio_query_vec = audio_query_vec / (np.linalg.norm(audio_query_vec) + 1e-9)
+
+        if audio_query_vec is not None:
+            audio_sims = _cosine_sim(audio_query_vec, _audio_matrix)
+            if len(audio_sims) > 0:
+                neutral_audio_sim = float(np.mean(audio_sims))
 
     # ── 5. Get top candidates, excluding liked anime ──────────────────────────
     liked_ids = {entry.mal_id for entry in liked_anime}
@@ -533,21 +605,31 @@ def recommend(
         vis_sim = float(masked_sims[row_idx])
 
         plot_sim = 0.0
+        audio_sim = None
         active_w_sim = W_SIM
         active_w_plot = 0.0
+        active_w_audio = 0.0
 
         if plot_sims is not None and _synopsis_index is not None:
             syn_idx = _synopsis_index.get(str(mal_id))
             if syn_idx is not None:
                 plot_sim = float(plot_sims[syn_idx])
-                active_w_sim = W_SIM  # keep full visual weight as requested
                 active_w_plot = W_PLOT
 
-        final = (active_w_sim * vis_sim + active_w_plot * plot_sim + W_SCORE * norm_score
-                 + W_POP * norm_pop + W_GENRE * genre_relevance
-                 + W_ERA * era_score)
+        if audio_sims is not None and _audio_index is not None:
+            a_idx = _audio_index.get(str(mal_id))
+            if a_idx is not None:
+                audio_sim = float(audio_sims[a_idx])
+            else:
+                # User preference: missing audio shouldn't suffer. Use neutral mean.
+                audio_sim = neutral_audio_sim
+            active_w_audio = W_AUDIO
 
-        candidates.append((final, vis_sim, plot_sim if plot_sims is not None else None, mal_id, info))
+        final = (active_w_sim * vis_sim + active_w_plot * plot_sim + active_w_audio * (audio_sim or 0.0)
+                 + W_SCORE * norm_score + W_POP * norm_pop + W_GENRE * genre_relevance + W_ERA * era_score)
+
+        candidates.append((final, vis_sim, plot_sim if plot_sims is not None else None, 
+                           audio_sim if audio_sims is not None else None, mal_id, info))
 
     # Sort by final score descending
     candidates.sort(key=lambda x: x[0], reverse=True)
@@ -563,7 +645,7 @@ def recommend(
         best_mmr_score = -float("inf")
         best_idx = 0
 
-        for i, (final, vis_sim, plot_sim, mid, info) in enumerate(remaining):
+        for i, (final, vis_sim, plot_sim, audio_sim, mid, info) in enumerate(remaining):
             if str(mid) in _index:
                 cand_emb = _embeddings_matrix[_index[str(mid)]]
                 max_sim_to_selected = max(
@@ -579,14 +661,14 @@ def recommend(
 
         chosen = remaining.pop(best_idx)
         selected.append(chosen)
-        _, _, _, chosen_mid, _ = chosen
+        _, _, _, _, chosen_mid, _ = chosen
         if str(chosen_mid) in _index:
             selected_embs.append(_embeddings_matrix[_index[str(chosen_mid)]])
 
 
     # ── 9. Build results ──────────────────────────────────────────────────────
     results = []
-    for rank, (final, vis_sim, plot_sim, mal_id, info) in enumerate(selected, start=1):
+    for rank, (final, vis_sim, plot_sim, audio_sim, mal_id, info) in enumerate(selected, start=1):
         results.append(Recommendation(
             rank=rank,
             mal_id=mal_id,
@@ -599,6 +681,7 @@ def recommend(
             local_image_path=info["local_image_path"],
             similarity=round(vis_sim, 4),
             plot_similarity=round(plot_sim, 4) if plot_sim is not None else None,
+            audio_similarity=round(audio_sim, 4) if audio_sim is not None else None,
             final_score=round(final, 4),
         ))
 

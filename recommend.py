@@ -226,6 +226,11 @@ Examples:
         help="Specific plot or synopsis preference (e.g. 'relaxing slice of life about camping')",
     )
     parser.add_argument(
+        "--audio-preference", "-a",
+        default=None,
+        help="What type of OP/ED theme you want (e.g. 'epic jazz trumpet', 'upbeat J-Pop')",
+    )
+    parser.add_argument(
         "--top-n", "-n",
         type=int,
         default=6,
@@ -310,6 +315,7 @@ Examples:
             liked_anime=liked_anime,
             preference_text_embed=preference_embed,
             plot_preference_text=args.plot_preference,
+            audio_preference_text=args.audio_preference,
             genre_filter=genre_filter,
             era_year=era_year,
             top_n=args.top_n + len(liked_anime) + 50,  # fetch extra; post-filter will trim
