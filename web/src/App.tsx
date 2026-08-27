@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { Sparkles, Music, BookOpen, Star, Search, Image as ImageIcon, Home, Library, Settings, Bell, Menu, Play, Info, X, Type, Hash, CalendarRange, Tv, MonitorPlay, ArrowDownWideNarrow, Filter, FilterX, Building2, Globe } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { Sparkles, Music, BookOpen, Star, Search, Image as ImageIcon, Home, Library, Settings, Bell, Menu, Play, Info, X, Type, Hash, CalendarRange, Tv, MonitorPlay, ArrowDownWideNarrow, Filter, FilterX, Building2, Globe, Download, Upload } from 'lucide-react'
 import './index.css'
 
 interface AnimeRecommendation {
@@ -24,8 +24,17 @@ interface CategoryRow {
   anime: AnimeRecommendation[]
 }
 
+const cleanSynopsis = (text?: string | null) => {
+  if (!text) return "No synopsis available."
+  return text
+    .replace(/\[Written by MAL Rewrite\]/gi, '')
+    .trim()
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState('home')
+  const [isSidebarExpanded, setIsSidebarExpanded] = useState(false)
+  const [episodePage, setEpisodePage] = useState(0)
   
   // Library State
   const [libraryLoading, setLibraryLoading] = useState(true)
@@ -39,11 +48,99 @@ function App() {
   
   // Video Player State
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const [isDub, setIsDub] = useState(false)
+  const [quality, setQuality] = useState('best')
+  const [toastMessage, setToastMessage] = useState<string | null>(null)
 
   // User Library State
   const [userLibrary, setUserLibrary] = useState<any[]>([])
   const [userLibraryLoading, setUserLibraryLoading] = useState(false)
   const [userLibraryStatusFilter, setUserLibraryStatusFilter] = useState('All')
+  const [librarySearch, setLibrarySearch] = useState('')
+  const [libraryGenre, setLibraryGenre] = useState('')
+  const [librarySeason, setLibrarySeason] = useState('')
+  const [libraryYear, setLibraryYear] = useState('')
+  const [libraryScore, setLibraryScore] = useState('')
+  const [libraryScoreCondition, setLibraryScoreCondition] = useState('>=')
+
+  const [importFile, setImportFile] = useState<File | null>(null)
+  const [showImportModal, setShowImportModal] = useState(false)
+  const [isDragging, setIsDragging] = useState(false)
+  const [showUniqueModal, setShowUniqueModal] = useState(false)
+  const [uniqueCount, setUniqueCount] = useState(0)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const calculateUniqueAnime = () => {
+    const bases = new Set();
+    userLibrary.filter(item => item.status === 'Completed').forEach(item => {
+      let title = item.title.toLowerCase();
+      title = title.replace(/season \d+/g, '')
+                   .replace(/part \d+/g, '')
+                   .replace(/\d+nd season/g, '')
+                   .replace(/\d+rd season/g, '')
+                   .replace(/\d+th season/g, '')
+                   .replace(/the final season/g, '')
+                   .split(':')[0] 
+                   .trim();
+      bases.add(title);
+    });
+    setUniqueCount(bases.size);
+    setShowUniqueModal(true);
+  }
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragging(true)
+  }
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragging(false)
+  }
+  useEffect(() => {
+    setEpisodePage(0)
+  }, [selectedAnime])
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragging(false)
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      setImportFile(e.dataTransfer.files[0])
+    }
+  }
+
+  const handleImportChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      setImportFile(e.target.files[0])
+    }
+    e.target.value = ''
+  }
+
+  const processImport = async (overwrite: boolean) => {
+    if (!importFile) return
+    const formData = new FormData()
+    formData.append('file', importFile)
+    formData.append('overwrite', overwrite ? 'true' : 'false')
+
+    try {
+      const res = await fetch('http://localhost:8000/api/library/import', {
+        method: 'POST',
+        body: formData,
+      })
+      const data = await res.json()
+      if (data.status === 'success') {
+        alert(`Successfully imported ${data.imported} items!`)
+        fetchUserLibrary()
+      } else {
+        alert(`Import failed: ${data.detail}`)
+      }
+    } catch (err) {
+      alert(`Error during import: ${err}`)
+    } finally {
+      setImportFile(null)
+      setShowImportModal(false)
+    }
+  }
 
   useEffect(() => {
     if (activeTab === 'library' && userLibrary.length === 0) {
@@ -136,6 +233,7 @@ function App() {
   }
 
   // Discover State
+  const [useLibraryAsRef, setUseLibraryAsRef] = useState(false)
   const [animeInput, setAnimeInput] = useState('')
   const [preference, setPreference] = useState('')
   const [plotPreference, setPlotPreference] = useState('')
@@ -197,8 +295,8 @@ function App() {
   
   const handleDiscoverSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!animeInput.trim()) {
-      setError("Please enter some anime titles you like.")
+    if (!useLibraryAsRef && !animeInput.trim()) {
+      setError("Please enter some anime titles you like, or select 'Use My Library'.")
       return
     }
     
@@ -214,7 +312,8 @@ function App() {
           preference: preference,
           plot_preference: plotPreference,
           audio_preference: audioPreference,
-          top_n: topN
+          top_n: topN,
+          use_library: useLibraryAsRef
         })
       })
       
@@ -244,6 +343,50 @@ function App() {
     }
   }
 
+  const playEpisode = async (title: string, episode: number) => {
+    setToastMessage(`Launching mpv for ${title} Episode ${episode}...`);
+    try {
+      const response = await fetch(`http://localhost:8000/api/play?title=${encodeURIComponent(title)}&episode=${episode}&dub=${isDub}&quality=${quality}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Failed to launch");
+      setTimeout(() => setToastMessage(null), 5000);
+    } catch (err: any) {
+      setToastMessage(`Error launching player: ${err.message}`);
+      setTimeout(() => setToastMessage(null), 5000);
+    }
+  }
+
+  const updateLibraryItem = async (mal_id: number, updates: any) => {
+    try {
+      const response = await fetch('http://localhost:8000/api/user_library', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mal_id, ...updates })
+      })
+      if (response.ok) {
+        fetchUserLibrary()
+        if (selectedAnime && selectedAnime.mal_id === mal_id) {
+            setSelectedAnime({...selectedAnime, ...updates})
+        }
+      }
+    } catch (err) {
+      console.error("Failed to update library item:", err)
+    }
+  }
+
+  const deleteLibraryItem = async (mal_id: number) => {
+    try {
+      const response = await fetch(`http://localhost:8000/api/user_library/${mal_id}`, {
+        method: 'DELETE',
+      })
+      if (response.ok) {
+        fetchUserLibrary()
+      }
+    } catch (err) {
+      console.error("Failed to delete library item:", err)
+    }
+  }
+
   const addToLibrary = async (anime: any) => {
     try {
       const response = await fetch('http://localhost:8000/api/user_library', {
@@ -252,7 +395,6 @@ function App() {
         body: JSON.stringify({ mal_id: anime.mal_id })
       })
       if (response.ok) {
-        alert("Added to Library successfully!")
         fetchUserLibrary()
       }
     } catch (err) {
@@ -263,8 +405,8 @@ function App() {
   return (
     <div className="app-container">
       {/* Sidebar Navigation */}
-      <aside className="sidebar">
-        <div className="brand">
+      <aside className={`sidebar ${isSidebarExpanded ? 'expanded' : ''}`}>
+        <div className="brand" onClick={() => setIsSidebarExpanded(!isSidebarExpanded)}>
           <Menu className="brand-icon" size={24} />
           <span>Anikoto</span>
         </div>
@@ -272,21 +414,27 @@ function App() {
         <nav className="nav-menu">
           <div className={`nav-item ${activeTab === 'home' ? 'active' : ''}`} onClick={() => setActiveTab('home')} title="Home">
             <Home size={24} />
+            <span>Home</span>
           </div>
           <div className={`nav-item ${activeTab === 'search' ? 'active' : ''}`} onClick={() => setActiveTab('search')} title="Directory Search">
             <Search size={24} />
+            <span>Search</span>
           </div>
           <div className={`nav-item ${activeTab === 'discover' ? 'active' : ''}`} onClick={() => setActiveTab('discover')} title="AI Discover">
             <Sparkles size={24} />
+            <span>Discover</span>
           </div>
           <div className={`nav-item ${activeTab === 'library' ? 'active' : ''}`} onClick={() => setActiveTab('library')} title="My Library">
             <Library size={24} />
+            <span>Library</span>
           </div>
           <div className={`nav-item ${activeTab === 'notifications' ? 'active' : ''}`} onClick={() => setActiveTab('notifications')} title="Notifications">
             <Bell size={24} />
+            <span>Notifications</span>
           </div>
           <div className={`nav-item ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => setActiveTab('settings')} title="Settings">
             <Settings size={24} />
+            <span>Settings</span>
           </div>
         </nav>
       </aside>
@@ -322,12 +470,12 @@ function App() {
                               <span>{hero.episodes || '?'} Episodes</span> • 
                               <span>{hero.year || 'Unknown Year'}</span>
                             </div>
-                            <p className="hero-synopsis">{hero.synopsis}</p>
+                            <p className="hero-synopsis">{cleanSynopsis(hero.synopsis)}</p>
                             <div className="hero-meta" style={{color: '#fff'}}>
                               {hero.genres?.split(',').slice(0,4).join(' • ')}
                             </div>
                             <div className="hero-actions">
-                              <button className="btn-primary" onClick={() => playVideo(hero.title, hero.theme_url)}>
+                              <button className="btn-primary" onClick={() => playEpisode(hero.title, 1)}>
                                 <Play size={18} fill="currentColor" /> Watch Now
                               </button>
                               <button className="btn-secondary" onClick={() => setSelectedAnime(hero)}>
@@ -372,6 +520,12 @@ function App() {
 
                             <div className="card-overlay">
                               <h3 className="anime-title">{anime.title}</h3>
+                              <div style={{ display: 'flex', gap: '6px', fontSize: '0.75rem', color: '#aaa', marginBottom: '4px' }}>
+                                <span>{anime.year || '?'}</span>
+                                <span>•</span>
+                                <span>{anime.episodes === 1 ? 'Movie' : (anime.episodes ? `${anime.episodes} Ep` : '? Ep')}</span>
+                              </div>
+                              <p className="anime-genres">{anime.genres || "Anime"}</p>
                             </div>
                             
                             <div className="hover-details">
@@ -408,15 +562,43 @@ function App() {
             </div>
 
             <form onSubmit={handleDiscoverSubmit} className="search-form">
-              <div className="form-group full">
-                <label className="input-label"><Star size={14} /> Your Reference Library</label>
-                <input 
-                  type="text"
-                  className="input-field" 
-                  placeholder="e.g. Death Note, Attack on Titan"
-                  value={animeInput}
-                  onChange={(e) => setAnimeInput(e.target.value)}
-                />
+              <div className="form-group full" style={{ marginBottom: '16px' }}>
+                <label className="input-label" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Star size={14} /> Your Reference Library
+                  
+                  <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Use My Library</span>
+                    <div 
+                      className={`toggle-switch ${useLibraryAsRef ? 'on' : 'off'}`} 
+                      onClick={() => setUseLibraryAsRef(!useLibraryAsRef)}
+                      style={{
+                        width: '40px', height: '20px', borderRadius: '10px', 
+                        background: useLibraryAsRef ? 'var(--accent-primary)' : 'rgba(255,255,255,0.2)',
+                        position: 'relative', cursor: 'pointer', transition: '0.3s'
+                      }}
+                    >
+                      <div style={{
+                        width: '16px', height: '16px', borderRadius: '50%', background: 'white',
+                        position: 'absolute', top: '2px', left: useLibraryAsRef ? '22px' : '2px', transition: '0.3s'
+                      }} />
+                    </div>
+                  </div>
+                </label>
+                
+                {!useLibraryAsRef ? (
+                  <input 
+                    type="text"
+                    className="input-field" 
+                    placeholder="e.g. Death Note, Attack on Titan"
+                    value={animeInput}
+                    onChange={(e) => setAnimeInput(e.target.value)}
+                  />
+                ) : (
+                  <div style={{ padding: '12px 16px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                    Using your Anikoto library to generate recommendations. 
+                    Titles with high "Worth Level" will be weighted more heavily!
+                  </div>
+                )}
               </div>
               
               <div className="form-group">
@@ -490,6 +672,11 @@ function App() {
 
                       <div className="card-overlay">
                         <h3 className="anime-title">{anime.title}</h3>
+                        <div style={{ display: 'flex', gap: '6px', fontSize: '0.75rem', color: '#aaa', marginBottom: '4px' }}>
+                          <span>{anime.year || '?'}</span>
+                          <span>•</span>
+                          <span>{anime.episodes === 1 ? 'Movie' : (anime.episodes ? `${anime.episodes} Ep` : '? Ep')}</span>
+                        </div>
                         <p className="anime-genres">{anime.genres || "Anime"}</p>
                       </div>
 
@@ -529,19 +716,91 @@ function App() {
               </div>
               <div className="profile-info">
                 <h1 className="profile-name">Chaitanya004</h1>
-                <span className="profile-rank">Newbie</span>
+                <span className="profile-rank">
+                  {userLibrary.filter(item => item.status === 'Completed').length < 10 ? 'Newbie' :
+                   userLibrary.filter(item => item.status === 'Completed').length < 50 ? 'Casual Watcher' :
+                   userLibrary.filter(item => item.status === 'Completed').length < 150 ? 'Otaku' :
+                   userLibrary.filter(item => item.status === 'Completed').length < 300 ? 'Anime Sage' : 'Anime God'}
+                </span>
                 
                 <div className="profile-stats">
-                  <div className="stat"><span>Mana</span> <strong>73</strong></div>
+                  <div className="stat"><span>Mana</span> <strong>{userLibrary.reduce((acc, item) => acc + (item.episodes_watched || 0), 0)}</strong></div>
                   <div className="stat"><span>Join date</span> <strong>Jun 14, 2026</strong></div>
                   <div className="stat"><span>Watch list</span> <strong>{userLibrary.length}</strong></div>
+                  <div className="stat" style={{display: 'flex', alignItems: 'center', gap: '8px'}}>
+                    <span>Completed Anime</span> 
+                    <strong>{userLibrary.filter(item => item.status === 'Completed').length}</strong>
+                    <button onClick={calculateUniqueAnime} style={{background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)', fontSize: '0.7rem', padding: '2px 6px', borderRadius: '4px', cursor: 'pointer'}}>Unique</button>
+                  </div>
                 </div>
+              </div>
+              
+              <div className="profile-actions" style={{ marginLeft: 'auto', display: 'flex', gap: '12px', alignItems: 'center' }}>
+                <button className="btn-secondary" onClick={() => window.location.href = 'http://localhost:8000/api/library/export?format=csv'}>
+                  <Download size={16} style={{marginRight:'6px'}} /> Export CSV
+                </button>
+                <button className="btn-secondary" onClick={() => window.location.href = 'http://localhost:8000/api/library/export?format=xml'}>
+                  <Download size={16} style={{marginRight:'6px'}} /> Export XML
+                </button>
+                <button className="btn-primary" onClick={() => setShowImportModal(true)}>
+                  <Upload size={16} style={{marginRight:'6px'}} /> Import
+                </button>
+                <input type="file" accept=".xml,.csv" style={{ display: 'none' }} ref={fileInputRef} onChange={handleImportChange} />
               </div>
             </div>
 
+            {/* Import Modal */}
+            {showImportModal && (
+              <div className="import-modal-overlay">
+                <div className="import-modal-card">
+                  <button className="import-modal-close" onClick={() => { setShowImportModal(false); setImportFile(null); }}>
+                    <X size={20} />
+                  </button>
+                  
+                  <h2 style={{ marginBottom: '8px', color: 'white', fontSize: '1.5rem' }}>Import Library</h2>
+                  <p style={{ color: 'var(--text-secondary)' }}>Restore your library from MyAnimeList XML or Anikoto CSV.</p>
+
+                  {!importFile ? (
+                    <div 
+                      className={`import-dropzone ${isDragging ? 'active' : ''}`}
+                      onDragOver={handleDragOver}
+                      onDragLeave={handleDragLeave}
+                      onDrop={handleDrop}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <Upload className="import-icon" size={48} />
+                      <h3 style={{ color: 'white', marginBottom: '8px' }}>Click or drag file to this area</h3>
+                      <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Supports .xml and .csv files</p>
+                    </div>
+                  ) : (
+                    <div className="import-confirm-box">
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px', marginBottom: '16px' }}>
+                        <div style={{ background: 'var(--accent-primary)', padding: '8px', borderRadius: '8px' }}>
+                          <Upload size={24} color="white" />
+                        </div>
+                        <div style={{ textAlign: 'left' }}>
+                          <div style={{ color: 'white', fontWeight: 'bold' }}>{importFile.name}</div>
+                          <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Ready to import</div>
+                        </div>
+                      </div>
+                      
+                      <p style={{ marginBottom: '24px', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                        Would you like to overwrite your existing library, or merge these items?
+                      </p>
+                      <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
+                        <button className="btn-secondary" style={{ flex: 1 }} onClick={() => setImportFile(null)}>Change File</button>
+                        <button className="btn-primary" style={{ flex: 1 }} onClick={() => processImport(false)}>Merge</button>
+                        <button className="btn-primary" style={{ background: '#ef4444', flex: 1 }} onClick={() => processImport(true)}>Overwrite</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Status Tabs */}
             <div className="library-tabs">
-              {['All', 'Watching', 'On-Hold', 'Planned', 'Dropped', 'Watched'].map(status => (
+              {['All', 'Watching', 'On-Hold', 'Planned', 'Dropped', 'Completed'].map(status => (
                 <button 
                   key={status}
                   className={`library-tab ${userLibraryStatusFilter === status ? 'active' : ''}`}
@@ -554,13 +813,71 @@ function App() {
 
             {/* Filter Bar */}
             <div className="library-filters">
-              <input type="text" placeholder="Search..." className="filter-input" />
-              <select className="filter-select"><option>Select genre</option></select>
-              <select className="filter-select"><option>Select season</option></select>
-              <select className="filter-select"><option>Select year</option></select>
-              <select className="filter-select"><option>Select type</option></select>
-              <select className="filter-select"><option>Select status</option></select>
-              <button className="filter-btn">Filter</button>
+              <input type="text" placeholder="Search..." className="filter-input" value={librarySearch} onChange={e => setLibrarySearch(e.target.value)} />
+              
+              <select className="filter-select" value={libraryGenre} onChange={e => setLibraryGenre(e.target.value)}>
+                <option value="">All Genres</option>
+                <option value="Action">Action</option>
+                <option value="Adventure">Adventure</option>
+                <option value="Comedy">Comedy</option>
+                <option value="Drama">Drama</option>
+                <option value="Fantasy">Fantasy</option>
+                <option value="Horror">Horror</option>
+                <option value="Mecha">Mecha</option>
+                <option value="Mystery">Mystery</option>
+                <option value="Romance">Romance</option>
+                <option value="Sci-Fi">Sci-Fi</option>
+                <option value="Slice of Life">Slice of Life</option>
+                <option value="Sports">Sports</option>
+                <option value="Supernatural">Supernatural</option>
+                <option value="Thriller">Thriller</option>
+              </select>
+              
+              <select className="filter-select" value={librarySeason} onChange={e => setLibrarySeason(e.target.value)}>
+                <option value="">All Seasons</option>
+                <option value="Winter">Winter</option>
+                <option value="Spring">Spring</option>
+                <option value="Summer">Summer</option>
+                <option value="Fall">Fall</option>
+              </select>
+              
+              <select className="filter-select" value={libraryYear} onChange={e => setLibraryYear(e.target.value)}>
+                <option value="">All Years</option>
+                {Array.from({length: 30}, (_, i) => new Date().getFullYear() - i).map(year => (
+                  <option key={year} value={year}>{year}</option>
+                ))}
+              </select>
+
+              <div style={{ display: 'flex', alignItems: 'center' }}>
+                <select 
+                  className="filter-select" 
+                  style={{ borderRight: 'none', borderTopRightRadius: 0, borderBottomRightRadius: 0, paddingRight: '8px' }} 
+                  value={libraryScoreCondition} 
+                  onChange={e => setLibraryScoreCondition(e.target.value)}
+                >
+                  <option value=">=">≥</option>
+                  <option value="<=">≤</option>
+                  <option value="=">=</option>
+                </select>
+                <input 
+                  type="number" 
+                  className="filter-select" 
+                  style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, width: '90px', paddingLeft: '8px' }} 
+                  placeholder="Score" 
+                  min="0" max="10" 
+                  value={libraryScore} 
+                  onChange={e => setLibraryScore(e.target.value)}
+                />
+              </div>
+              <button className="filter-btn" onClick={() => {
+                setLibrarySearch('');
+                setLibraryGenre('');
+                setLibrarySeason('');
+                setLibraryYear('');
+                setLibraryScore('');
+                setLibraryScoreCondition('>=');
+
+              }}>Clear Filters</button>
             </div>
 
             {/* List View */}
@@ -570,6 +887,22 @@ function App() {
               <div className="library-list">
                 {userLibrary
                   .filter(item => userLibraryStatusFilter === 'All' || item.status === userLibraryStatusFilter)
+                  .filter(item => !librarySearch || 
+                    (item.title && item.title.toLowerCase().includes(librarySearch.toLowerCase())) ||
+                    (item.title_english && item.title_english.toLowerCase().includes(librarySearch.toLowerCase()))
+                  )
+                  .filter(item => !libraryGenre || (item.genres && item.genres.includes(libraryGenre)))
+                  .filter(item => !librarySeason || (item.season && item.season === librarySeason))
+                  .filter(item => !libraryYear || (item.year && item.year.toString() === libraryYear))
+                  .filter(item => {
+                    if (!libraryScore) return true;
+                    if (!item.score) return false;
+                    const val = parseInt(libraryScore);
+                    if (libraryScoreCondition === '>=') return item.score >= val;
+                    if (libraryScoreCondition === '<=') return item.score <= val;
+                    if (libraryScoreCondition === '=') return item.score === val;
+                    return true;
+                  })
                   .map((item, idx) => (
                   <div key={idx} className="library-list-item" onClick={() => setSelectedAnime(item)}>
                     <img src={item.cover_url} alt={item.title} className="library-item-cover" />
@@ -580,6 +913,12 @@ function App() {
                         <span>{item.status}</span>
                         <span className="meta-divider">•</span>
                         <span>{item.episodes_watched} / {item.total_episodes || '?'} EPS</span>
+                        {item.score > 0 && (
+                          <>
+                            <span className="meta-divider">•</span>
+                            <span style={{ color: 'var(--accent-primary)', fontWeight: 'bold' }}>★ {item.score}</span>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -778,6 +1117,12 @@ function App() {
                         )}
                         <div className="card-overlay">
                           <h3 className="anime-title">{anime.title}</h3>
+                          <div style={{ display: 'flex', gap: '6px', fontSize: '0.75rem', color: '#aaa', marginBottom: '4px' }}>
+                            <span>{anime.year || '?'}</span>
+                            <span>•</span>
+                            <span>{anime.episodes === 1 ? 'Movie' : (anime.episodes ? `${anime.episodes} Ep` : '? Ep')}</span>
+                          </div>
+                          <p className="anime-genres">{anime.genres || "Anime"}</p>
                         </div>
                         <div className="hover-details">
                           <div className="metric-row">
@@ -850,25 +1195,97 @@ function App() {
                     {selectedAnime.score && (
                       <span className="stat-item"><Star size={16} className="text-accent" /> Rating: {Math.round(selectedAnime.score * 10)}%</span>
                     )}
-                    <span className="stat-item"><Tv size={16} /> Format: {selectedAnime.type || (selectedAnime.episodes === 1 ? 'Movie' : 'TV Series')}</span>
-                    <span className="stat-item"><Play size={16} /> Episodes: {selectedAnime.episodes || '?'}</span>
+                    <span className="stat-item"><Tv size={16} /> Format: {selectedAnime.type || ((selectedAnime.episodes || selectedAnime.total_episodes) === 1 ? 'Movie' : 'TV Series')}</span>
+                    <span className="stat-item"><Play size={16} /> Episodes: {selectedAnime.episodes || selectedAnime.total_episodes || '?'}</span>
                     {selectedAnime.members && (
                       <span className="stat-item">Reviews: {selectedAnime.members.toLocaleString()}</span>
                     )}
                   </div>
                   
                   <div className="anikoto-modal-actions">
-                    <button className="anikoto-btn-play" onClick={() => playVideo(selectedAnime.title, selectedAnime.theme_url)}>
+                    <button className="anikoto-btn-play" onClick={() => playEpisode(selectedAnime.title, 1)}>
                       <Play size={18} fill="currentColor" /> Watch Now
                     </button>
-                    <button className="anikoto-btn-icon" onClick={() => addToLibrary(selectedAnime)} title="Add to Library">
-                      <Library size={18} />
-                    </button>
-                    <button className="anikoto-btn-icon" onClick={() => playVideo(selectedAnime.title, selectedAnime.theme_url)} title="YouTube">
-                      <Play size={18} />
+                    {!userLibrary.find(item => item.mal_id === selectedAnime.mal_id) && (
+                      <button className="anikoto-btn-secondary" onClick={() => addToLibrary(selectedAnime)}>
+                        <Library size={18} /> Add to Library
+                      </button>
+                    )}
+                    <button className="anikoto-btn-secondary" onClick={() => playVideo(selectedAnime.title, selectedAnime.theme_url)}>
+                      <Play size={18} /> Trailer
                     </button>
                   </div>
                   
+                  {userLibrary.find(item => item.mal_id === selectedAnime.mal_id) && (() => {
+                    const libItem = userLibrary.find(item => item.mal_id === selectedAnime.mal_id) || selectedAnime;
+                    return (
+                      <div style={{ marginTop: '16px', background: 'rgba(255,255,255,0.05)', padding: '12px', borderRadius: '8px', display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <div className="library-management-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', marginBottom: '4px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--accent-primary)', fontSize: '0.9rem', fontWeight: 'bold' }}>
+                            <Library size={16} /> In Your Library
+                          </div>
+                          <button 
+                            onClick={() => deleteLibraryItem(libItem.mal_id)}
+                            style={{ padding: '4px 8px', fontSize: '0.75rem', background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '4px', cursor: 'pointer', transition: 'all 0.2s' }}
+                            onMouseOver={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.2)'}
+                            onMouseOut={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)'}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                        <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', width: '100%' }}>
+                          <div style={{ flex: 1, minWidth: '100px' }}>
+                            <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Status</label>
+                            <select 
+                              className="input-field" 
+                              style={{ padding: '6px 12px', width: '100%' }}
+                              value={libItem.status || 'Watching'}
+                              onChange={(e) => updateLibraryItem(libItem.mal_id, { status: e.target.value })}
+                            >
+                              <option value="Watching">Watching</option>
+                              <option value="Completed">Completed</option>
+                              <option value="On-Hold">On-Hold</option>
+                              <option value="Dropped">Dropped</option>
+                              <option value="Plan to Watch">Plan to Watch</option>
+                            </select>
+                          </div>
+                          <div style={{ flex: 1, minWidth: '100px' }}>
+                            <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Episodes</label>
+                            <input 
+                              type="number"
+                              min="0"
+                              max={selectedAnime.total_episodes || 9999}
+                              className="input-field" 
+                              style={{ padding: '6px 12px', width: '100%' }}
+                              value={libItem.episodes_watched || 0}
+                              onChange={(e) => updateLibraryItem(libItem.mal_id, { episodes_watched: parseInt(e.target.value) || 0 })}
+                            />
+                          </div>
+                          <div style={{ flex: 1, minWidth: '150px' }}>
+                            <label style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                              <span>Score</span>
+                              <span style={{ color: 'var(--accent-primary)', fontWeight: 'bold' }}>{libItem.score > 0 ? libItem.score : 'Unrated'}</span>
+                            </label>
+                            <input 
+                              type="range"
+                              min="0"
+                              max="10"
+                              step="1"
+                              style={{ width: '100%', cursor: 'pointer', accentColor: 'var(--accent-primary)' }}
+                              value={libItem.score || 0}
+                              onChange={(e) => {
+                                const val = parseInt(e.target.value) || 0;
+                                setUserLibrary(prev => prev.map(i => i.mal_id === libItem.mal_id ? { ...i, score: val } : i));
+                              }}
+                              onMouseUp={(e) => updateLibraryItem(libItem.mal_id, { score: parseInt(e.currentTarget.value) || 0 })}
+                              onTouchEnd={(e) => updateLibraryItem(libItem.mal_id, { score: parseInt(e.currentTarget.value) || 0 })}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })()}
+
                   <div className="anikoto-modal-meta-row">
                     {selectedAnime.season && selectedAnime.year && (
                       <span><CalendarRange size={14}/> {selectedAnime.season} {selectedAnime.year}</span>
@@ -896,7 +1313,7 @@ function App() {
                     <div className="synopsis-divider">
                       <span>Synopsis</span>
                     </div>
-                    <p className="synopsis-text">{selectedAnime.synopsis || "No synopsis available."}</p>
+                    <p className="synopsis-text">{cleanSynopsis(selectedAnime.synopsis)}</p>
                   </div>
                   
                   {/* Recommendations Section */}
@@ -913,7 +1330,7 @@ function App() {
                             <img src={rec.cover_url || './no_image_cover.jpg'} alt={rec.title} />
                             <div className="rec-info">
                               <span className="rec-title">{rec.title}</span>
-                              <span className="rec-meta">{rec.year || '?'} • {rec.episodes ? `${rec.episodes} Ep` : 'Movie'}</span>
+                              <span className="rec-meta">{rec.year || '?'} • {rec.episodes === 1 ? 'Movie' : (rec.episodes ? `${rec.episodes} Ep` : '? Ep')}</span>
                             </div>
                           </div>
                         ))}
@@ -924,37 +1341,96 @@ function App() {
                 
                 {/* Right: Episodes List */}
                 <div className="anikoto-modal-right">
-                  <h3 style={{marginBottom: '16px', color: 'white', fontSize: '1.2rem'}}>Episodes</h3>
-                  <div className="episodes-list">
-                    {selectedAnime.episodes === 1 ? (
-                      <div className="anikoto-episode-card" onClick={() => playVideo(selectedAnime.title + ' Movie', selectedAnime.theme_url)}>
-                        <div className="episode-thumb">
-                          <img src={selectedAnime.cover_url || './no_image_cover.jpg'} alt="Movie" />
-                          <div className="episode-play-overlay">
-                            <Play size={20} fill="white" />
-                          </div>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px'}}>
+                    <h3 style={{color: 'white', fontSize: '1.2rem', margin: 0}}>Episodes</h3>
+                    <div style={{display: 'flex', alignItems: 'center', gap: '16px'}}>
+                      <select 
+                        value={quality}
+                        onChange={(e) => setQuality(e.target.value)}
+                        style={{
+                          background: 'rgba(255,255,255,0.1)',
+                          border: 'none',
+                          color: 'white',
+                          padding: '4px 8px',
+                          borderRadius: '4px',
+                          fontSize: '0.85rem',
+                          outline: 'none',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        <option value="best">Best Quality</option>
+                        <option value="1080p">1080p</option>
+                        <option value="720p">720p</option>
+                        <option value="480p">480p</option>
+                        <option value="360p">360p</option>
+                      </select>
+                      
+                      <div style={{display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer'}} onClick={() => setIsDub(!isDub)}>
+                        <div style={{width: '36px', height: '18px', borderRadius: '10px', background: isDub ? 'var(--primary)' : 'rgba(255,255,255,0.2)', position: 'relative', transition: '0.3s'}}>
+                          <div style={{width: '14px', height: '14px', borderRadius: '50%', background: 'white', position: 'absolute', top: '2px', left: isDub ? '20px' : '2px', transition: '0.3s'}}></div>
                         </div>
-                        <div className="episode-info">
-                          <div className="episode-title">The Movie</div>
-                          <div className="episode-meta">1h 46m</div>
-                        </div>
+                        <span style={{fontSize: '0.85rem', color: isDub ? 'white' : 'var(--text-secondary)'}}>Watch Dub</span>
                       </div>
-                    ) : (
-                      Array.from({ length: selectedAnime.episodes || 12 }).map((_, i) => (
-                        <div key={i} className="anikoto-episode-card" onClick={() => playVideo(selectedAnime.title + ` Episode ${i+1}`, selectedAnime.theme_url)}>
-                          <div className="episode-thumb">
-                            <img src={selectedAnime.cover_url || './no_image_cover.jpg'} alt={`Episode ${i+1}`} />
-                            <div className="episode-play-overlay">
-                              <Play size={20} fill="white" />
-                            </div>
-                          </div>
-                          <div className="episode-info">
-                            <div className="episode-title">Episode {i + 1}</div>
-                            <div className="episode-meta">24m</div>
-                          </div>
-                        </div>
-                      ))
-                    )}
+                    </div>
+                  </div>
+                  
+                  <div className="episodes-list" style={{ borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                    <div style={{ padding: '16px', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <select 
+                        className="input-field"
+                        style={{ padding: '6px 12px', minWidth: '120px' }}
+                        value={episodePage}
+                        onChange={(e) => setEpisodePage(Number(e.target.value))}
+                      >
+                        {Array.from({ length: Math.ceil((selectedAnime.episodes || 1200) / 100) }).map((_, i) => (
+                          <option key={i} value={i}>
+                            {i * 100 + 1}-{Math.min((i + 1) * 100, selectedAnime.episodes || 1200)}
+                          </option>
+                        ))}
+                      </select>
+                      
+                      <input 
+                        type="number" 
+                        id="jump-episode-input"
+                        placeholder="Find num..." 
+                        className="input-field" 
+                        style={{ flex: 1, padding: '6px 12px' }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            const ep = parseInt((e.target as HTMLInputElement).value);
+                            if (ep > 0) playEpisode(selectedAnime.title, ep);
+                          }
+                        }}
+                      />
+                      <button 
+                        className="anikoto-btn-primary" 
+                        style={{ padding: '6px 12px' }}
+                        onClick={() => {
+                          const input = document.getElementById('jump-episode-input') as HTMLInputElement;
+                          const ep = parseInt(input.value);
+                          if (ep > 0) playEpisode(selectedAnime.title, ep);
+                        }}
+                      >
+                        Play
+                      </button>
+                    </div>
+
+                    <div className="episodes-grid">
+                      {selectedAnime.episodes === 1 ? (
+                        <button className="episode-grid-btn" onClick={() => playEpisode(selectedAnime.title, 1)}>
+                          1 (Movie)
+                        </button>
+                      ) : (
+                        Array.from({ length: Math.min(100, (selectedAnime.episodes || 1200) - episodePage * 100) }).map((_, i) => {
+                          const epNum = episodePage * 100 + i + 1;
+                          return (
+                            <button key={epNum} className="episode-grid-btn" onClick={() => playEpisode(selectedAnime.title, epNum)}>
+                              {epNum}
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -963,6 +1439,24 @@ function App() {
         )}
         
       </main>
+
+      {/* Unique Anime Pop Up */}
+      {showUniqueModal && (
+        <div className="modal-overlay" onClick={() => setShowUniqueModal(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '400px', textAlign: 'center', padding: '32px' }}>
+            <div style={{ marginBottom: '16px', color: 'var(--accent-primary)', display: 'flex', justifyContent: 'center' }}>
+              <MonitorPlay size={48} />
+            </div>
+            <h2 style={{ marginBottom: '12px', fontSize: '1.5rem', color: 'white' }}>Unique Franchises</h2>
+            <p style={{ color: 'var(--text-secondary)', marginBottom: '24px', lineHeight: '1.5' }}>
+              You have completed exactly <strong style={{ color: 'white', fontSize: '1.2rem' }}>{uniqueCount}</strong> unique anime series, carefully excluding all sequels, movies, and spin-offs!
+            </p>
+            <button className="btn-primary" onClick={() => setShowUniqueModal(false)} style={{ width: '100%', justifyContent: 'center' }}>
+              Awesome!
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Video Player Modal */}
       {videoUrl && (
@@ -975,6 +1469,29 @@ function App() {
           </div>
         </div>
       )}
+      {/* Launching Player Toast */}
+      {toastMessage && (
+        <div style={{
+          position: 'fixed',
+          bottom: '24px',
+          right: '24px',
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          padding: '16px 24px',
+          borderRadius: '8px',
+          color: 'white',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '12px',
+          boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
+          zIndex: 9999,
+          animation: 'slideUp 0.3s ease-out forwards'
+        }}>
+          <MonitorPlay size={20} color="var(--primary)" />
+          {toastMessage}
+        </div>
+      )}
+
     </div>
   )
 }

@@ -354,23 +354,37 @@ async def fetch_animethemes(session, mal_id, sem):
         return None
 
 async def tiered_fetch(session, mal_id, anilist_sem, jikan_sem, kitsu_sem, animethemes_sem):
+    merged_data = {}
+    
+    def merge_result(res):
+        if not res: return
+        for k, v in res.items():
+            if v and not merged_data.get(k):
+                merged_data[k] = v
+
+    def has_all_fields():
+        required = ['synopsis', 'anilist_id', 'episodes', 'year', 'season', 'status', 'studio', 'genres']
+        return all(merged_data.get(k) for k in required)
+
     res = await fetch_animethemes(session, mal_id, animethemes_sem)
-    if res and res.get('synopsis'):
-        return mal_id, res
+    merge_result(res)
+    if has_all_fields(): return mal_id, merged_data
 
     res = await fetch_anilist(session, mal_id, anilist_sem)
-    if res and res.get('synopsis'):
-        return mal_id, res
+    merge_result(res)
+    if has_all_fields(): return mal_id, merged_data
     
     res = await fetch_jikan(session, mal_id, jikan_sem)
-    if res and res.get('synopsis'):
-        return mal_id, res
+    merge_result(res)
+    if has_all_fields(): return mal_id, merged_data
 
     res = await fetch_kitsu(session, mal_id, kitsu_sem)
-    if res and res.get('synopsis'):
-        return mal_id, res
+    merge_result(res)
     
-    return mal_id, {'data_source': 'none'}
+    if not merged_data:
+        return mal_id, {'data_source': 'none'}
+        
+    return mal_id, merged_data
 
 async def process_batch_enrich(session, records, conn, c, anilist_sem, jikan_sem, kitsu_sem, animethemes_sem, pbar):
     async def fetch_and_update(mal_id):
@@ -413,7 +427,7 @@ async def process_batch_enrich(session, records, conn, c, anilist_sem, jikan_sem
 async def enrich_metadata(limit=None):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("SELECT mal_id FROM anime WHERE data_source = 'kaggle_base' OR data_source IS NULL")
+    c.execute("SELECT mal_id FROM anime WHERE data_source = 'kaggle_base' OR data_source IS NULL OR status IS NULL OR anilist_id IS NULL OR studio IS NULL")
     records = c.fetchall()
     
     if not records:

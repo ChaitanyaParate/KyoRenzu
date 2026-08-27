@@ -1,5 +1,9 @@
 import traceback
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.responses import Response
+import csv
+import xml.etree.ElementTree as ET
+import io
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -11,11 +15,13 @@ import httpx
 import json
 import time
 import asyncio
+import subprocess
 
-from input_parser import auto_parse, get_all_raw_titles, _resolve_by_ids, _load_title_map
+from input_parser import auto_parse, get_all_raw_titles, _resolve_by_ids, _load_title_map, AnimeEntry
 from preference_encoder import EncodedPreference
 from recommender import recommend as core_recommend
 from rapidfuzz import fuzz, process
+from mal_scraper import scrape_base, enrich_metadata
 
 app = FastAPI(title="Don't Judge a Book by Its Cover - API")
 
@@ -27,9 +33,14 @@ def init_db():
                 status TEXT DEFAULT 'Watching',
                 episodes_watched INTEGER DEFAULT 0,
                 score REAL DEFAULT 0,
+                worth_level TEXT DEFAULT '',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        try:
+            conn.execute("ALTER TABLE user_library ADD COLUMN worth_level TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass # Column already exists
 
 @app.on_event("startup")
 async def startup_event():
@@ -50,14 +61,50 @@ class RecommendRequest(BaseModel):
     audio_preference: Optional[str] = ""
     top_n: int = 6
     preferred_year: Optional[int] = None
+    use_library: Optional[bool] = False
 
 @app.post("/api/recommend")
 async def get_recommendations(req: RecommendRequest):
     try:
         # Parse liked anime
-        liked_anime = auto_parse(req.anime_input.strip())
+        liked_anime = []
+        if req.use_library:
+            with sqlite3.connect("user_library.db") as udb:
+                udb_cursor = udb.cursor()
+                udb_cursor.execute("SELECT mal_id, worth_level FROM user_library WHERE status IN ('Completed', 'Watching')")
+                library_items = udb_cursor.fetchall()
+                
+            if library_items:
+                mal_ids = [item[0] for item in library_items]
+                worth_levels = {item[0]: item[1] for item in library_items}
+                
+                with sqlite3.connect("anime_data.db") as adb:
+                    adb.row_factory = sqlite3.Row
+                    adb_cursor = adb.cursor()
+                    adb_cursor.execute(f"SELECT mal_id, title_english, title, genres, score, local_image_path FROM anime WHERE mal_id IN ({','.join(map(str, mal_ids))})")
+                    for row in adb_cursor.fetchall():
+                        mal_id = row['mal_id']
+                        worth = worth_levels.get(mal_id, '').lower()
+                        
+                        weight = 1.0
+                        if 'high' in worth or '++' in worth: weight = 1.5
+                        elif 'low' in worth or '--' in worth: weight = 0.5
+                        
+                        liked_anime.append(AnimeEntry(
+                            mal_id=mal_id,
+                            title=row['title_english'] or row['title'],
+                            title_english=row['title_english'],
+                            title_japanese=row['title'],
+                            genres=row['genres'],
+                            score=row['score'],
+                            local_image_path=row['local_image_path'],
+                            weight=weight
+                        ))
+        else:
+            liked_anime = auto_parse(req.anime_input.strip() if req.anime_input else "")
+            
         if not liked_anime:
-            raise HTTPException(status_code=400, detail="Could not resolve any anime from input.")
+            raise HTTPException(status_code=400, detail="Could not resolve any anime from input or library.")
             
         # Encode preference
         pref_text = req.preference.strip() if req.preference else ""
@@ -114,23 +161,38 @@ async def get_recommendations(req: RecommendRequest):
             
         # Format results for frontend
         output = []
-        for i, r in enumerate(results):
-            # Convert local_image_path to something the frontend can fetch
-            # We will serve the 'covers' directory statically
-            cover_url = f"http://localhost:8000/covers/{os.path.basename(r.local_image_path)}" if r.local_image_path else None
-            
-            output.append({
-                "rank": i + 1,
-                "title": r.title,
-                "title_english": r.title_english,
-                "score": r.score,
-                "members": r.members,
-                "genres": r.genres,
-                "similarity": r.similarity,
-                "plot_similarity": r.plot_similarity,
-                "audio_similarity": r.audio_similarity,
-                "cover_url": cover_url
-            })
+        with sqlite3.connect("anime_data.db") as conn:
+            for i, r in enumerate(results):
+                # Convert local_image_path to something the frontend can fetch
+                # We will serve the 'covers' directory statically
+                cover_url = f"http://localhost:8000/covers/{os.path.basename(r.local_image_path)}" if r.local_image_path else None
+                
+                c = conn.cursor()
+                c.execute("SELECT aired_from, episodes FROM anime WHERE mal_id = ?", (r.mal_id,))
+                row = c.fetchone()
+                year = None
+                episodes = None
+                if row:
+                    aired_from, eps = row
+                    if aired_from:
+                        year = aired_from[:4]
+                    episodes = eps
+                
+                output.append({
+                    "mal_id": r.mal_id,
+                    "rank": i + 1,
+                    "title": r.title,
+                    "title_english": r.title_english,
+                    "score": r.score,
+                    "members": r.members,
+                    "genres": r.genres,
+                    "similarity": r.similarity,
+                    "plot_similarity": r.plot_similarity,
+                    "audio_similarity": r.audio_similarity,
+                    "cover_url": cover_url,
+                    "year": year,
+                    "episodes": episodes
+                })
             
         return {"status": "success", "results": output}
         
@@ -368,6 +430,20 @@ class UserLibraryUpdate(BaseModel):
     status: Optional[str] = None
     episodes_watched: Optional[int] = None
     score: Optional[float] = None
+    worth_level: Optional[str] = None
+
+@app.delete("/api/user_library/{mal_id}")
+async def delete_user_library_item(mal_id: int):
+    try:
+        with sqlite3.connect("user_library.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM user_library WHERE mal_id = ?", (mal_id,))
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Item not found")
+            conn.commit()
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/user_library")
 async def get_user_library():
@@ -378,9 +454,9 @@ async def get_user_library():
             cursor.execute("ATTACH DATABASE 'anime_data.db' AS anime_db")
             cursor.execute("""
                 SELECT 
-                    u.mal_id, u.status, u.episodes_watched, u.score, u.updated_at,
+                    u.mal_id, u.status, u.episodes_watched, u.score, u.worth_level, u.updated_at,
                     a.title, a.title_english, a.genres, a.episodes as total_episodes,
-                    a.season, a.year, a.image_url, a.local_image_path
+                    a.season, a.year, a.image_url, a.local_image_path, a.synopsis
                 FROM user_library u
                 JOIN anime_db.anime a ON u.mal_id = a.mal_id
                 ORDER BY u.updated_at DESC
@@ -406,28 +482,30 @@ async def update_user_library(update: UserLibraryUpdate):
             cursor = conn.cursor()
             
             # Check if exists
-            cursor.execute("SELECT status, episodes_watched, score FROM user_library WHERE mal_id = ?", (update.mal_id,))
+            cursor.execute("SELECT status, episodes_watched, score, worth_level FROM user_library WHERE mal_id = ?", (update.mal_id,))
             row = cursor.fetchone()
             
             if row:
                 new_status = update.status if update.status is not None else row[0]
                 new_episodes = update.episodes_watched if update.episodes_watched is not None else row[1]
                 new_score = update.score if update.score is not None else row[2]
+                new_worth = update.worth_level if update.worth_level is not None else row[3]
                 
                 cursor.execute("""
                     UPDATE user_library 
-                    SET status = ?, episodes_watched = ?, score = ?, updated_at = CURRENT_TIMESTAMP
+                    SET status = ?, episodes_watched = ?, score = ?, worth_level = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE mal_id = ?
-                """, (new_status, new_episodes, new_score, update.mal_id))
+                """, (new_status, new_episodes, new_score, new_worth, update.mal_id))
             else:
                 new_status = update.status if update.status is not None else 'Watching'
                 new_episodes = update.episodes_watched if update.episodes_watched is not None else 0
                 new_score = update.score if update.score is not None else 0
+                new_worth = update.worth_level if update.worth_level is not None else ''
                 
                 cursor.execute("""
-                    INSERT INTO user_library (mal_id, status, episodes_watched, score)
-                    VALUES (?, ?, ?, ?)
-                """, (update.mal_id, new_status, new_episodes, new_score))
+                    INSERT INTO user_library (mal_id, status, episodes_watched, score, worth_level)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (update.mal_id, new_status, new_episodes, new_score, new_worth))
             
             conn.commit()
             return {"status": "success"}
@@ -442,6 +520,240 @@ async def delete_user_library(mal_id: int):
             conn.execute("DELETE FROM user_library WHERE mal_id = ?", (mal_id,))
             conn.commit()
             return {"status": "success"}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/api/library/export")
+async def export_user_library(format: str = "xml"):
+    try:
+        with sqlite3.connect("user_library.db") as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT u.mal_id, u.status, u.episodes_watched, u.score, u.worth_level
+                FROM user_library u
+            """)
+            rows = cursor.fetchall()
+
+        # Fetch titles for the XML from anime_data.db
+        with sqlite3.connect("anime_data.db") as conn2:
+            conn2.row_factory = sqlite3.Row
+            cursor2 = conn2.cursor()
+            anime_info = {}
+            if rows:
+                mal_ids = [str(r['mal_id']) for r in rows]
+                cursor2.execute(f"SELECT mal_id, title_english, title, episodes FROM anime WHERE mal_id IN ({','.join(mal_ids)})")
+                for r in cursor2.fetchall():
+                    anime_info[r['mal_id']] = dict(r)
+                    
+        # Status Mapping (Anikoto -> MAL)
+        status_map = {
+            "Completed": "Completed",
+            "Watching": "Watching",
+            "On-Hold": "On-Hold",
+            "Dropped": "Dropped",
+            "Plan to Watch": "Planned"
+        }
+
+        if format == "csv":
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(["ID", "title", "status", "score", "episodes_watched", "total_episodes", "worth_level"])
+            for r in rows:
+                mal_id = r['mal_id']
+                info = anime_info.get(mal_id, {})
+                title = info.get('title_english') or info.get('title') or f"Unknown {mal_id}"
+                total_episodes = info.get('episodes') or 0
+                writer.writerow([
+                    mal_id, 
+                    title,
+                    status_map.get(r['status'], r['status']),
+                    r['score'],
+                    r['episodes_watched'],
+                    total_episodes,
+                    r['worth_level']
+                ])
+            return Response(content=output.getvalue(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=library_export.csv"})
+        
+        else: # xml
+            import xml.dom.minidom
+            root = ET.Element("myanimelist")
+            myinfo = ET.SubElement(root, "myinfo")
+            ET.SubElement(myinfo, "user_name").text = "AnikotoUser"
+            ET.SubElement(myinfo, "user_export_type").text = "1"
+            
+            for r in rows:
+                anime = ET.SubElement(root, "anime")
+                mal_id = r['mal_id']
+                info = anime_info.get(mal_id, {})
+                
+                ET.SubElement(anime, "series_animedb_id").text = str(mal_id)
+                ET.SubElement(anime, "series_title").text = "___CDATA___" + str(info.get('title_english') or info.get('title') or f"Unknown {mal_id}") + "___ENDCDATA___"
+                ET.SubElement(anime, "series_type").text = "TV"
+                ET.SubElement(anime, "series_episodes").text = str(info.get('episodes') or 0)
+                
+                ET.SubElement(anime, "my_watched_episodes").text = str(r['episodes_watched'])
+                ET.SubElement(anime, "my_score").text = str(r['score'])
+                ET.SubElement(anime, "my_status").text = status_map.get(r['status'], r['status'])
+                
+            xml_str = ET.tostring(root, encoding='unicode', xml_declaration=False)
+            xml_str = xml.dom.minidom.parseString(xml_str).toprettyxml(indent="\t")
+            xml_str = xml_str.replace('<?xml version="1.0" ?>', '<?xml version="1.0" encoding="UTF-8" ?>\n\t\t<!--\n\t\t Created by XML Export feature at MyAnimeList.net\n\t\t-->\n')
+            xml_str = xml_str.replace("___CDATA___", "<![CDATA[").replace("___ENDCDATA___", "]]>")
+            return Response(content=xml_str, media_type="application/xml", headers={"Content-Disposition": "attachment; filename=library_export.xml"})
+
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/library/import")
+async def import_user_library(file: UploadFile = File(...), overwrite: bool = Form(False)):
+    try:
+        content = await file.read()
+        
+        # Status Mapping (MAL -> Anikoto)
+        status_map = {
+            "Completed": "Completed",
+            "Watching": "Watching",
+            "On-Hold": "On-Hold",
+            "Dropped": "Dropped",
+            "Plan to Watch": "Planned"
+        }
+        
+        imported_entries = []
+        
+        if file.filename.endswith(".csv"):
+            text = content.decode("utf-8")
+            reader = csv.DictReader(io.StringIO(text))
+            
+            with sqlite3.connect("anime_data.db") as adb:
+                adb_cursor = adb.cursor()
+                for row in reader:
+                    mal_id = 0
+                    try:
+                        mal_id = int(row.get('anime_id', 0) or row.get('mal_id', 0) or 0)
+                    except ValueError:
+                        pass
+                        
+                    if mal_id <= 0:
+                        title = row.get('Anime', '') or row.get('title', '')
+                        if not title: continue
+                        adb_cursor.execute("SELECT mal_id FROM anime WHERE title_english LIKE ? OR title LIKE ? COLLATE NOCASE", (f"%{title}%", f"%{title}%"))
+                        res = adb_cursor.fetchone()
+                        if res:
+                            mal_id = res[0]
+                        else:
+                            continue
+                            
+                    status = status_map.get(row.get('status', ''), "Completed") # Default to Completed for Ani.csv
+                    score = float(row.get('score', 0) or 0)
+                    ep_str = row.get('my_watched_episodes', '') or row.get('episodes_watched', '') or row.get('Ep. No.', '')
+                    try:
+                        episodes_watched = int(ep_str) if ep_str else 0
+                    except ValueError:
+                        episodes_watched = 0
+                    worth_level = row.get('worth_level', '') or row.get('Worth Level', '')
+                    
+                    # Fetch base info to check for overflow
+                    adb_cursor.execute("SELECT title_english, title, episodes FROM anime WHERE mal_id = ?", (mal_id,))
+                    base_res = adb_cursor.fetchone()
+                    if not base_res:
+                        imported_entries.append((mal_id, status, episodes_watched, score, worth_level))
+                        continue
+                        
+                    base_total_eps = base_res[2] or 0
+                    base_title = base_res[0] or base_res[1] or ""
+                    
+                    if base_total_eps > 0 and episodes_watched > base_total_eps:
+                        # Distribute Overflow
+                        imported_entries.append((mal_id, "Completed", base_total_eps, score, worth_level))
+                        remaining = episodes_watched - base_total_eps
+                        
+                        # Extract core franchise name
+                        search_term = base_title.split(':')[0]
+                        if ' Season' in search_term: search_term = search_term.split(' Season')[0]
+                        if len(search_term) < 4: search_term = base_title
+                            
+                        # Query sequels
+                        adb_cursor.execute("""
+                            SELECT mal_id, episodes, title, title_english 
+                            FROM anime 
+                            WHERE (title_english LIKE ? OR title LIKE ? COLLATE NOCASE) 
+                            AND mal_id != ? 
+                            ORDER BY year ASC, aired_from ASC
+                        """, (f"{search_term}%", f"{search_term}%", mal_id))
+                        
+                        for rel in adb_cursor.fetchall():
+                            if remaining <= 0: break
+                            rel_id, rel_eps = rel[0], rel[1] or 0
+                            rel_title = str(rel[2] or '').lower() + ' ' + str(rel[3] or '').lower()
+                            
+                            if rel_eps == 0: continue
+                            
+                            # Filter out common spin-offs, OVAs, movies, and recaps
+                            skip_keywords = [
+                                'ova', 'ona', 'oad', 'movie', 'picture drama', 'recap', 'special', 
+                                'junior high', 'chibi', 'bow and arrow', 'wings of freedom', 
+                                'roar of awakening', 'chronicle', 'music', 'digest', 'preview', 'summary',
+                                'no regrets', 'lost girls'
+                            ]
+                            if any(kw in rel_title for kw in skip_keywords):
+                                continue
+                                
+                            # Also skip short series (usually OVAs/specials) if distributing
+                            if rel_eps < 5 and base_total_eps > 8:
+                                continue
+                                
+                            if remaining >= rel_eps:
+                                imported_entries.append((rel_id, "Completed", rel_eps, score, worth_level))
+                                remaining -= rel_eps
+                            else:
+                                imported_entries.append((rel_id, "Watching", remaining, score, worth_level))
+                                remaining = 0
+                    else:
+                        imported_entries.append((mal_id, status, episodes_watched, score, worth_level))
+                
+        elif file.filename.endswith(".xml"):
+            root = ET.fromstring(content)
+            for anime in root.findall('anime'):
+                mal_id_el = anime.find('series_animedb_id')
+                if mal_id_el is None or not mal_id_el.text: continue
+                mal_id = int(mal_id_el.text)
+                
+                status_el = anime.find('my_status')
+                status = status_map.get(status_el.text if status_el is not None else '', "Watching")
+                
+                score_el = anime.find('my_score')
+                score = float(score_el.text) if score_el is not None and score_el.text else 0
+                
+                eps_el = anime.find('my_watched_episodes')
+                episodes_watched = int(eps_el.text) if eps_el is not None and eps_el.text else 0
+                
+                imported_entries.append((mal_id, status, episodes_watched, score, ""))
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported file format")
+
+        with sqlite3.connect("user_library.db") as conn:
+            cursor = conn.cursor()
+            if overwrite:
+                cursor.execute("DELETE FROM user_library")
+            
+            for mal_id, status, episodes_watched, score, worth_level in imported_entries:
+                cursor.execute("SELECT mal_id FROM user_library WHERE mal_id = ?", (mal_id,))
+                if cursor.fetchone():
+                    cursor.execute("""
+                        UPDATE user_library 
+                        SET status = ?, episodes_watched = ?, score = ?, worth_level = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE mal_id = ?
+                    """, (status, episodes_watched, score, worth_level, mal_id))
+                else:
+                    cursor.execute("""
+                        INSERT INTO user_library (mal_id, status, episodes_watched, score, worth_level)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (mal_id, status, episodes_watched, score, worth_level))
+            conn.commit()
+            
+        return {"status": "success", "imported": len(imported_entries)}
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -612,6 +924,59 @@ async def get_recommendations(mal_id: int):
                     break
             
         return {"status": "success", "recommendations": results}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/play")
+async def play_episode(title: str, episode: int, dub: bool = False, quality: str = "best"):
+    cmd = ["./ani-cli-master/ani-cli", title, "-q", quality, "-S", "1", "-e", str(episode), "--exit-after-play"]
+    if dub:
+        cmd.append("--dub")
+    
+    env = os.environ.copy()
+    env["PATH"] = f"{os.path.expanduser('~')}/.local/bin:" + env.get("PATH", "")
+    
+    try:
+        # Run process asynchronously so we don't block the API
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT
+        )
+        
+        # Read output for up to 10 seconds to catch early errors (like "No results found")
+        error_log = []
+        try:
+            async with asyncio.timeout(10.0):
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        break
+                    decoded_line = line.decode('utf-8').strip()
+                    error_log.append(decoded_line)
+                    
+                    # If ani-cli successfully scraped and is launching mpv, it prints this:
+                    if "Playing episode" in decoded_line:
+                        return {"status": "playing", "message": f"Launching player for {title} Episode {episode}"}
+                        
+        except asyncio.TimeoutError:
+            # If it takes more than 10 seconds, it's likely stuck downloading or scraping very slowly.
+            # We assume it's working to prevent the UI from hanging forever.
+            return {"status": "playing", "message": f"Scraping is taking a while, but player will launch soon..."}
+            
+        # If we reach here, the process exited early.
+        await process.wait()
+        if process.returncode != 0:
+            err = " ".join(error_log)
+            if "No results found" in err or "Invalid episode" in err:
+                raise HTTPException(status_code=404, detail="Could not find this anime or episode on ani-cli.")
+            raise HTTPException(status_code=500, detail=f"ani-cli failed: {err[-200:]}")
+            
+        return {"status": "playing", "message": f"Launching player for {title} Episode {episode}"}
+    except HTTPException:
+        raise
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
