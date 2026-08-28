@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Sparkles, Music, BookOpen, Star, Search, Image as ImageIcon, Home, Library, Settings, Bell, Menu, Play, Info, X, Type, Hash, CalendarRange, Tv, MonitorPlay, ArrowDownWideNarrow, Filter, FilterX, Building2, Globe, Download, Upload } from 'lucide-react'
+import { Sparkles, Music, BookOpen, Star, Search, Image as ImageIcon, Home, Library, Bell, Menu, Play, Info, X, Type, Hash, CalendarRange, Tv, MonitorPlay, ArrowDownWideNarrow, Filter, FilterX, Building2, Globe, Download, Upload, Shuffle, Users, User, Compass, AlertCircle } from 'lucide-react'
 import './index.css'
 
 interface AnimeRecommendation {
@@ -35,11 +35,17 @@ function App() {
   const [activeTab, setActiveTab] = useState('home')
   const [isSidebarExpanded, setIsSidebarExpanded] = useState(false)
   const [episodePage, setEpisodePage] = useState(0)
+
+  // Notifications State
+  const [notifications, setNotifications] = useState<any[]>([])
+  const [showNotifications, setShowNotifications] = useState(false)
+  const unreadCount = notifications.filter(n => !n.is_read).length
   
   // Library State
   const [libraryLoading, setLibraryLoading] = useState(true)
   const [heroAnimes, setHeroAnimes] = useState<AnimeRecommendation[]>([])
   const [currentHeroIndex, setCurrentHeroIndex] = useState(0)
+  const [topAnimeTab, setTopAnimeTab] = useState('Day')
   const [categories, setCategories] = useState<CategoryRow[]>([])
   
   // Details Modal State
@@ -50,7 +56,9 @@ function App() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [isDub, setIsDub] = useState(false)
   const [quality, setQuality] = useState('best')
+  const [provider, setProvider] = useState('anidb')
   const [toastMessage, setToastMessage] = useState<string | null>(null)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   // User Library State
   const [userLibrary, setUserLibrary] = useState<any[]>([])
@@ -238,7 +246,7 @@ function App() {
   const [preference, setPreference] = useState('')
   const [plotPreference, setPlotPreference] = useState('')
   const [audioPreference, setAudioPreference] = useState('')
-  const [topN, setTopN] = useState(12)
+  const [topN] = useState(12)
   const [discoverLoading, setDiscoverLoading] = useState(false)
   const [results, setResults] = useState<AnimeRecommendation[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -339,20 +347,39 @@ function App() {
     if (themeUrl) {
       setVideoUrl(themeUrl)
     } else {
-      window.open('https://www.youtube.com/results?search_query=' + encodeURIComponent(title + ' anime theme'), '_blank')
+      window.open('https://www.youtube.com/results?search_query=' + encodeURIComponent(title + ' trailer'), '_blank')
     }
   }
 
-  const playEpisode = async (title: string, episode: number) => {
+  const handleRandomAnime = async () => {
+    setToastMessage("Finding a random anime...");
+    try {
+      const response = await fetch('http://localhost:8000/api/random');
+      const data = await response.json();
+      if (response.ok) {
+        setSelectedAnime(data);
+        setToastMessage(null);
+      } else {
+        setToastMessage("Failed to fetch random anime");
+        setTimeout(() => setToastMessage(null), 3000);
+      }
+    } catch (err) {
+      console.error(err);
+      setToastMessage("Failed to fetch random anime");
+      setTimeout(() => setToastMessage(null), 3000);
+    }
+  }
+
+  const playEpisode = async (title: string, alt_title: string | null, episode: number) => {
     setToastMessage(`Launching mpv for ${title} Episode ${episode}...`);
     try {
-      const response = await fetch(`http://localhost:8000/api/play?title=${encodeURIComponent(title)}&episode=${episode}&dub=${isDub}&quality=${quality}`);
+      const response = await fetch(`http://localhost:8000/api/play?title=${encodeURIComponent(title)}&alt_title=${alt_title ? encodeURIComponent(alt_title) : ''}&episode=${episode}&dub=${isDub}&quality=${quality}&provider=${provider}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Failed to launch");
       setTimeout(() => setToastMessage(null), 5000);
     } catch (err: any) {
-      setToastMessage(`Error launching player: ${err.message}`);
-      setTimeout(() => setToastMessage(null), 5000);
+      setToastMessage(null);
+      setErrorMessage(err.message || "An unknown error occurred while launching the player.");
     }
   }
 
@@ -402,45 +429,128 @@ function App() {
     }
   }
 
+  const fetchNotifications = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/notifications')
+      if (res.ok) {
+        setNotifications(await res.json())
+      }
+    } catch(e) {}
+  }
+
+  const markNotificationsRead = async () => {
+    const unread = notifications.filter(n => !n.is_read).map(n => n.id)
+    if (unread.length === 0) return
+    try {
+      await fetch('http://localhost:8000/api/notifications/read', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ notification_ids: unread })
+      })
+      setNotifications(notifications.map(n => ({...n, is_read: 1})))
+    } catch(e) {}
+  }
+
+  useEffect(() => {
+    fetchNotifications()
+    const int = setInterval(fetchNotifications, 60000)
+    return () => clearInterval(int)
+  }, [])
+
   return (
     <div className="app-container">
-      {/* Sidebar Navigation */}
-      <aside className={`sidebar ${isSidebarExpanded ? 'expanded' : ''}`}>
-        <div className="brand" onClick={() => setIsSidebarExpanded(!isSidebarExpanded)}>
-          <Menu className="brand-icon" size={24} />
-          <span>Anikoto</span>
+      {/* Top Navigation Header */}
+      <header className="top-header">
+        <div className="header-container">
+          <div className="header-left">
+            <div className="menu-toggler" onClick={() => setIsSidebarExpanded(!isSidebarExpanded)}>
+              <Menu size={24} />
+            </div>
+            <div className="brand" onClick={() => setActiveTab('home')}>
+              <span style={{ color: 'white' }}>Ani</span><span style={{ color: 'var(--accent-primary)' }}>koto</span>
+            </div>
+            <nav className="header-nav">
+              <span className={`nav-link ${activeTab === 'home' ? 'active' : ''}`} onClick={() => setActiveTab('home')}>Home</span>
+              <span className={`nav-link ${activeTab === 'search' ? 'active' : ''}`} onClick={() => setActiveTab('search')}>Search</span>
+              <span className={`nav-link ${activeTab === 'discover' ? 'active' : ''}`} onClick={() => setActiveTab('discover')}>Discover</span>
+              <span className={`nav-link ${activeTab === 'library' ? 'active' : ''}`} onClick={() => setActiveTab('library')}>Library</span>
+            </nav>
+          </div>
+          
+          <div className="header-center">
+            <div className="header-search-bar">
+              <Search size={18} className="search-icon" />
+              <input 
+                type="text" 
+                placeholder="Search anime..." 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    setActiveTab('search');
+                  }
+                }}
+              />
+            </div>
+          </div>
+
+          <div className="header-right">
+            <div className="header-action" title="Random Anime" onClick={handleRandomAnime}>
+              <Shuffle size={20} />
+            </div>
+            <div className="header-action" title="Watch2Gether" onClick={() => {setToastMessage("Watch2Gether is coming soon!"); setTimeout(() => setToastMessage(null), 3000)}}>
+              <Users size={20} />
+            </div>
+            <div className="header-action notification-bell-container" onClick={() => { setShowNotifications(!showNotifications); if (!showNotifications) markNotificationsRead(); }}>
+              <Bell size={20} />
+              {unreadCount > 0 && <span className="notification-badge">{unreadCount}</span>}
+              {showNotifications && (
+                <div className="notification-dropdown" onClick={e => e.stopPropagation()}>
+                  <div className="notification-dropdown-header">Notifications</div>
+                  <div className="notification-list">
+                    {notifications.length > 0 ? notifications.map((n, i) => (
+                      <div key={i} className={`notification-item ${!n.is_read ? 'unread' : ''}`}>
+                        {n.message}
+                        <div className="notification-time">{new Date(n.created_at).toLocaleString()}</div>
+                      </div>
+                    )) : (
+                      <div style={{padding: '16px', textAlign: 'center', color: '#666', fontSize: '0.9rem'}}>No new notifications</div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="header-action user-profile" title="Profile" onClick={() => {setToastMessage("User Profiles coming soon!"); setTimeout(() => setToastMessage(null), 3000)}}>
+              <User size={20} />
+            </div>
+          </div>
         </div>
-        
-        <nav className="nav-menu">
-          <div className={`nav-item ${activeTab === 'home' ? 'active' : ''}`} onClick={() => setActiveTab('home')} title="Home">
-            <Home size={24} />
-            <span>Home</span>
+      </header>
+
+      {/* Mobile Menu Overlay */}
+      {isSidebarExpanded && (
+        <div className="mobile-menu-overlay" onClick={() => setIsSidebarExpanded(false)}>
+          <div className="mobile-menu-content" onClick={(e) => e.stopPropagation()}>
+            <nav className="mobile-nav">
+              <div className={`mobile-nav-link ${activeTab === 'home' ? 'active' : ''}`} onClick={() => { setActiveTab('home'); setIsSidebarExpanded(false); }}>
+                <Home size={20} /> Home
+              </div>
+              <div className={`mobile-nav-link ${activeTab === 'search' ? 'active' : ''}`} onClick={() => { setActiveTab('search'); setIsSidebarExpanded(false); }}>
+                <Search size={20} /> Search
+              </div>
+              <div className={`mobile-nav-link ${activeTab === 'discover' ? 'active' : ''}`} onClick={() => { setActiveTab('discover'); setIsSidebarExpanded(false); }}>
+                <Compass size={20} /> Discover
+              </div>
+              <div className={`mobile-nav-link ${activeTab === 'library' ? 'active' : ''}`} onClick={() => { setActiveTab('library'); setIsSidebarExpanded(false); }}>
+                <Library size={20} /> My Library
+              </div>
+            </nav>
           </div>
-          <div className={`nav-item ${activeTab === 'search' ? 'active' : ''}`} onClick={() => setActiveTab('search')} title="Directory Search">
-            <Search size={24} />
-            <span>Search</span>
-          </div>
-          <div className={`nav-item ${activeTab === 'discover' ? 'active' : ''}`} onClick={() => setActiveTab('discover')} title="AI Discover">
-            <Sparkles size={24} />
-            <span>Discover</span>
-          </div>
-          <div className={`nav-item ${activeTab === 'library' ? 'active' : ''}`} onClick={() => setActiveTab('library')} title="My Library">
-            <Library size={24} />
-            <span>Library</span>
-          </div>
-          <div className={`nav-item ${activeTab === 'notifications' ? 'active' : ''}`} onClick={() => setActiveTab('notifications')} title="Notifications">
-            <Bell size={24} />
-            <span>Notifications</span>
-          </div>
-          <div className={`nav-item ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => setActiveTab('settings')} title="Settings">
-            <Settings size={24} />
-            <span>Settings</span>
-          </div>
-        </nav>
-      </aside>
+        </div>
+      )}
 
       {/* Main Content Area */}
-      <main className="main-content" style={{ padding: activeTab === 'home' ? '0 0 32px 0' : '32px 48px' }}>
+      <main className="main-content" style={{ padding: activeTab === 'home' ? '0' : '32px 48px' }}>
         
         {/* HOME LIBRARY VIEW */}
         {activeTab === 'home' && (
@@ -459,42 +569,48 @@ function App() {
                         {hero.banner_url ? (
                           <img src={hero.banner_url} alt={hero.title} className="hero-banner-image" />
                         ) : (
-                          <img src={hero.cover_url || ''} alt={hero.title} className="hero-bg-blur" />
+                          <>
+                            <img src={hero.cover_url || ''} alt={hero.title} className="hero-bg-blur" />
+                            <img src={hero.cover_url || ''} alt={hero.title} className="hero-banner-image-contain" />
+                          </>
                         )}
                         
                         <div className="hero-overlay">
                           <div className="hero-content">
                             <h1 className="hero-title">{hero.title}</h1>
-                            <div className="hero-meta">
-                              <span>TV Series</span> • 
-                              <span>{hero.episodes || '?'} Episodes</span> • 
-                              <span>{hero.year || 'Unknown Year'}</span>
+                            <div className="hero-meta" style={{display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '16px'}}>
+                              <span style={{background: 'var(--accent-primary)', padding: '2px 6px', borderRadius: '4px', fontSize: '0.8rem', fontWeight: 'bold'}}>HD</span>
+                              <span style={{background: 'rgba(255,255,255,0.1)', padding: '2px 6px', borderRadius: '4px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px'}}><Type size={12}/> {hero.episodes || '?'}</span>
+                              <span style={{background: 'rgba(255,255,255,0.1)', padding: '2px 6px', borderRadius: '4px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px'}}><Tv size={12}/> {hero.episodes || '?'}</span>
+                              <span style={{color: 'var(--text-secondary)', fontSize: '0.9rem'}}>• {hero.year || 'Unknown Year'}</span>
                             </div>
-                            <p className="hero-synopsis">{cleanSynopsis(hero.synopsis)}</p>
-                            <div className="hero-meta" style={{color: '#fff'}}>
-                              {hero.genres?.split(',').slice(0,4).join(' • ')}
-                            </div>
-                            <div className="hero-actions">
-                              <button className="btn-primary" onClick={() => playEpisode(hero.title, 1)}>
-                                <Play size={18} fill="currentColor" /> Watch Now
+                            <p className="hero-synopsis" style={{fontSize: '0.95rem', color: 'var(--text-secondary)', lineHeight: '1.5', marginBottom: '24px', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden'}}>{cleanSynopsis(hero.synopsis)}</p>
+                            
+                            <div className="hero-actions" style={{display: 'flex', gap: '16px'}}>
+                              <button className="btn-primary" style={{display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 24px', fontSize: '1.1rem', fontWeight: '700', borderRadius: '30px'}} onClick={() => playEpisode(hero.title, hero.title_original, 1)}>
+                                <Play size={20} fill="currentColor" /> Play Now
                               </button>
-                              <button className="btn-secondary" onClick={() => setSelectedAnime(hero)}>
-                                <Info size={18} /> View Details
+                              <button className="btn-secondary" style={{display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 24px', fontSize: '1.1rem', fontWeight: '700', borderRadius: '30px', background: 'rgba(255,255,255,0.1)', color: 'white', border: 'none'}} onClick={() => setSelectedAnime(hero)}>
+                                <Info size={20} /> Details
                               </button>
                             </div>
                           </div>
-                          
-                          {!hero.banner_url && (
-                            <img src={hero.cover_url || ''} alt={hero.title} className="hero-banner-image-contain" />
-                          )}
                         </div>
                       </div>
                     ))}
-                    <div className="hero-dots">
+                    <div className="hero-dots" style={{position: 'absolute', bottom: '20px', right: '20px', display: 'flex', gap: '6px', zIndex: 10}}>
                       {heroAnimes.map((_, idx) => (
                         <button 
                           key={idx} 
-                          className={`hero-dot ${idx === currentHeroIndex ? 'active' : ''}`}
+                          style={{
+                            width: idx === currentHeroIndex ? '24px' : '8px', 
+                            height: '8px', 
+                            borderRadius: '4px', 
+                            background: idx === currentHeroIndex ? 'var(--accent-primary)' : 'rgba(255,255,255,0.3)', 
+                            border: 'none', 
+                            cursor: 'pointer',
+                            transition: '0.3s'
+                          }}
                           onClick={() => setCurrentHeroIndex(idx)}
                         />
                       ))}
@@ -502,51 +618,114 @@ function App() {
                   </div>
                 )}
                 
-                {/* Categories */}
-                <div style={{ padding: '0 48px' }}>
-                  {categories.map((cat, idx) => (
-                    <div key={idx} className="category-row">
-                      <h2 className="section-title">{cat.category}</h2>
-                      <div className="carousel-container">
-                        {cat.anime.map((anime, aIdx) => (
-                          <div key={aIdx} className="anime-card" onClick={() => setSelectedAnime(anime)}>
-                            {anime.cover_url ? (
-                              <img src={anime.cover_url} alt={anime.title} className="anime-cover" />
-                            ) : (
-                              <div className="anime-cover" style={{ backgroundColor: '#222', display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-                                <ImageIcon size={48} opacity={0.3} />
+                {/* Anikoto Dual Column Layout */}
+                <div className="anikoto-home-layout">
+                  {/* Left Main Content */}
+                  <div className="anikoto-main-col">
+                    <div className="anikoto-sections">
+                      {/* Recently Updated & Upcoming Anime Grids */}
+                      {categories.filter(cat => ['Recently Updated', 'Upcoming Anime'].includes(cat.category)).map((cat, idx) => (
+                        <section key={idx} className="category-section">
+                          <div className="section-head">
+                            <h2 className="section-title">{cat.category}</h2>
+                            <span className="view-more" onClick={() => setActiveTab('search')} style={{cursor: 'pointer'}}>View more <ArrowDownWideNarrow size={14} /></span>
+                          </div>
+                          <div className="anime-grid">
+                            {cat.anime.map((anime: any, aIdx: number) => (
+                              <div key={aIdx} className="anikoto-card" onClick={() => setSelectedAnime(anime)}>
+                                <div className="poster-container">
+                                  {anime.cover_url ? (
+                                    <img src={anime.cover_url} alt={anime.title} loading="lazy" />
+                                  ) : (
+                                    <div className="anime-card-placeholder">
+                                      <ImageIcon size={32} />
+                                    </div>
+                                  )}
+                                  <div className="ep-status-overlay">
+                                    <span className="ep-sub"><Type size={10} style={{marginRight: '2px'}}/>{anime.episodes || '?'}</span>
+                                    <span className="ep-dub"><Tv size={10} style={{marginRight: '2px'}}/>HD</span>
+                                  </div>
+                                  <div className="poster-hover-details">
+                                    <h4 className="hover-title">{anime.title}</h4>
+                                    <div className="hover-meta">
+                                      <span>{anime.year || '?'}</span>
+                                      <span>•</span>
+                                      <span>{anime.episodes ? `${anime.episodes} EPS` : '? EPS'}</span>
+                                    </div>
+                                    <div className="hover-play-btn">
+                                      <Play size={24} fill="white" color="white" />
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className="card-info">
+                                  <h3 className="card-title" title={anime.title}>{anime.title}</h3>
+                                </div>
                               </div>
-                            )}
+                            ))}
+                          </div>
+                        </section>
+                      ))}
 
-                            <div className="card-overlay">
-                              <h3 className="anime-title">{anime.title}</h3>
-                              <div style={{ display: 'flex', gap: '6px', fontSize: '0.75rem', color: '#aaa', marginBottom: '4px' }}>
-                                <span>{anime.year || '?'}</span>
-                                <span>•</span>
-                                <span>{anime.episodes === 1 ? 'Movie' : (anime.episodes ? `${anime.episodes} Ep` : '? Ep')}</span>
-                              </div>
-                              <p className="anime-genres">{anime.genres || "Anime"}</p>
+                      {/* Top Tables */}
+                      <div className="top-tables-container">
+                        {categories.filter(cat => ['New Release', 'Just Completed'].includes(cat.category)).map((cat, idx) => (
+                          <section key={idx} className="top-table-section" style={{ flex: 1, minWidth: '300px' }}>
+                            <div className="section-head">
+                              <h2 className="section-title">{cat.category}</h2>
+                              <span className="view-more" onClick={() => setActiveTab('search')} style={{cursor: 'pointer'}}>View more <ArrowDownWideNarrow size={14} /></span>
                             </div>
-                            
-                            <div className="hover-details">
-                              <div className="metric-row">
-                                <span className="metric-label">Score</span>
-                                <span className="metric-value"><Star size={12} fill="currentColor" style={{marginRight:'4px', transform:'translateY(-1px)'}}/>{anime.score?.toFixed(1) || '?'}</span>
-                              </div>
-                              <div className="metric-row">
-                                <span className="metric-label">Year</span>
-                                <span className="metric-value">{anime.year || '?'}</span>
-                              </div>
-                              <div className="metric-row">
-                                <span className="metric-label">Episodes</span>
-                                <span className="metric-value">{anime.episodes || '?'}</span>
+                            <div className="top-table-list">
+                              {cat.anime.slice(0, 5).map((anime: any, aIdx: number) => (
+                                <div key={aIdx} className="top-table-item" onClick={() => setSelectedAnime(anime)} style={{ display: 'flex', gap: '12px', marginBottom: '16px', cursor: 'pointer', background: 'rgba(255,255,255,0.02)', padding: '8px', borderRadius: '8px', transition: '0.2s' }} onMouseOver={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.08)'} onMouseOut={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.02)'}>
+                                  <div style={{ width: '60px', height: '80px', flexShrink: 0, borderRadius: '4px', overflow: 'hidden' }}>
+                                    <img src={anime.cover_url || ''} alt={anime.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                  </div>
+                                  <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                                    <h3 style={{ fontSize: '1rem', fontWeight: '500', marginBottom: '8px', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{anime.title}</h3>
+                                    <div style={{ display: 'flex', gap: '8px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                      <span className="ep-pill" style={{ background: 'var(--accent-primary)', color: 'black', padding: '2px 6px', borderRadius: '4px', fontWeight: 'bold' }}>{anime.episodes || '?'} EPS</span>
+                                      <span>• TV</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </section>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Right Sidebar (Top Anime) */}
+                  <div className="anikoto-sidebar-col">
+                    <section className="top-anime-widget">
+                      <div className="section-head">
+                        <h2 className="section-title">Top Anime</h2>
+                        <div className="widget-tabs">
+                          <span className={`tab ${topAnimeTab === 'Day' ? 'active' : ''}`} onClick={() => setTopAnimeTab('Day')}>Day</span>
+                          <span className={`tab ${topAnimeTab === 'Week' ? 'active' : ''}`} onClick={() => setTopAnimeTab('Week')}>Week</span>
+                          <span className={`tab ${topAnimeTab === 'Month' ? 'active' : ''}`} onClick={() => setTopAnimeTab('Month')}>Month</span>
+                        </div>
+                      </div>
+                      <div className="top-anime-list">
+                        {(categories[topAnimeTab === 'Day' ? 0 : topAnimeTab === 'Week' ? 1 : 2]?.anime || []).slice(0, 10).map((anime: any, idx: number) => (
+                          <div key={idx} className={`top-anime-item rank${idx + 1}`} onClick={() => setSelectedAnime(anime)}>
+                            <div className="rank-badge">{idx + 1}</div>
+                            <div className="top-poster">
+                              <img src={anime.cover_url || ''} alt={anime.title} />
+                            </div>
+                            <div className="top-info">
+                              <h3 className="top-title" title={anime.title}>{anime.title}</h3>
+                              <div className="top-meta">
+                                <span className="ep-pill">{anime.episodes || '?'}</span>
+                                <span className="dot">TV</span>
                               </div>
                             </div>
                           </div>
                         ))}
                       </div>
-                    </div>
-                  ))}
+                    </section>
+                  </div>
                 </div>
               </>
             )}
@@ -670,33 +849,21 @@ function App() {
                         </div>
                       )}
 
-                      <div className="card-overlay">
-                        <h3 className="anime-title">{anime.title}</h3>
-                        <div style={{ display: 'flex', gap: '6px', fontSize: '0.75rem', color: '#aaa', marginBottom: '4px' }}>
+                      <div className="poster-hover-details">
+                        <h4 className="hover-title">{anime.title}</h4>
+                        <div className="hover-meta">
                           <span>{anime.year || '?'}</span>
                           <span>•</span>
-                          <span>{anime.episodes === 1 ? 'Movie' : (anime.episodes ? `${anime.episodes} Ep` : '? Ep')}</span>
+                          <span>{anime.episodes === 1 ? 'Movie' : (anime.episodes ? `${anime.episodes} EPS` : '? EPS')}</span>
                         </div>
-                        <p className="anime-genres">{anime.genres || "Anime"}</p>
-                      </div>
-
-                      <div className="hover-details">
-                        <div className="metric-row">
-                          <span className="metric-label">Visual Match</span>
-                          <span className="metric-value visual">{anime.similarity?.toFixed(2)}</span>
-                        </div>
-                        {anime.plot_similarity !== null && anime.plot_similarity !== undefined && (
-                          <div className="metric-row">
-                            <span className="metric-label">Plot Match</span>
-                            <span className="metric-value plot">{anime.plot_similarity.toFixed(2)}</span>
+                        {anime.similarity !== undefined && anime.similarity !== null && (
+                          <div style={{fontSize: '0.85rem', color: '#10b981', marginBottom: '16px', fontWeight: 700}}>
+                            {Math.round(anime.similarity * 100)}% Visual Match
                           </div>
                         )}
-                        {anime.audio_similarity !== null && anime.audio_similarity !== undefined && (
-                          <div className="metric-row">
-                            <span className="metric-label">Audio Match</span>
-                            <span className="metric-value audio">{anime.audio_similarity.toFixed(2)}</span>
-                          </div>
-                        )}
+                        <div className="hover-play-btn">
+                          <Play size={24} fill="white" color="white" />
+                        </div>
                       </div>
                     </div>
                   ))}
@@ -1115,27 +1282,20 @@ function App() {
                             <ImageIcon size={48} opacity={0.3} />
                           </div>
                         )}
-                        <div className="card-overlay">
-                          <h3 className="anime-title">{anime.title}</h3>
-                          <div style={{ display: 'flex', gap: '6px', fontSize: '0.75rem', color: '#aaa', marginBottom: '4px' }}>
+                        <div className="poster-hover-details">
+                          <h4 className="hover-title">{anime.title}</h4>
+                          <div className="hover-meta">
                             <span>{anime.year || '?'}</span>
                             <span>•</span>
-                            <span>{anime.episodes === 1 ? 'Movie' : (anime.episodes ? `${anime.episodes} Ep` : '? Ep')}</span>
+                            <span>{anime.episodes === 1 ? 'Movie' : (anime.episodes ? `${anime.episodes} EPS` : '? EPS')}</span>
                           </div>
-                          <p className="anime-genres">{anime.genres || "Anime"}</p>
-                        </div>
-                        <div className="hover-details">
-                          <div className="metric-row">
-                            <span className="metric-label">Score</span>
-                            <span className="metric-value"><Star size={12} fill="currentColor" style={{marginRight:'4px', transform:'translateY(-1px)'}}/>{anime.score?.toFixed(1) || '?'}</span>
-                          </div>
-                          <div className="metric-row">
-                            <span className="metric-label">Year</span>
-                            <span className="metric-value">{anime.year || '?'}</span>
-                          </div>
-                          <div className="metric-row">
-                            <span className="metric-label">Episodes</span>
-                            <span className="metric-value">{anime.episodes || '?'}</span>
+                          {anime.score && (
+                            <div style={{fontSize: '0.85rem', color: '#fbbf24', marginBottom: '16px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px'}}>
+                              <Star size={12} fill="currentColor" /> {anime.score.toFixed(1)} Score
+                            </div>
+                          )}
+                          <div className="hover-play-btn">
+                            <Play size={24} fill="white" color="white" />
                           </div>
                         </div>
                       </div>
@@ -1198,12 +1358,12 @@ function App() {
                     <span className="stat-item"><Tv size={16} /> Format: {selectedAnime.type || ((selectedAnime.episodes || selectedAnime.total_episodes) === 1 ? 'Movie' : 'TV Series')}</span>
                     <span className="stat-item"><Play size={16} /> Episodes: {selectedAnime.episodes || selectedAnime.total_episodes || '?'}</span>
                     {selectedAnime.members && (
-                      <span className="stat-item">Reviews: {selectedAnime.members.toLocaleString()}</span>
+                      <span className="stat-item">Reviews: {selectedAnime.members?.toLocaleString() || "N/A"}</span>
                     )}
                   </div>
                   
                   <div className="anikoto-modal-actions">
-                    <button className="anikoto-btn-play" onClick={() => playEpisode(selectedAnime.title, 1)}>
+                    <button className="anikoto-btn-play" onClick={() => playEpisode(selectedAnime.title, selectedAnime.title_original, 1)}>
                       <Play size={18} fill="currentColor" /> Watch Now
                     </button>
                     {!userLibrary.find(item => item.mal_id === selectedAnime.mal_id) && (
@@ -1398,7 +1558,7 @@ function App() {
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') {
                             const ep = parseInt((e.target as HTMLInputElement).value);
-                            if (ep > 0) playEpisode(selectedAnime.title, ep);
+                            if (ep > 0) playEpisode(selectedAnime.title, selectedAnime.title_original, ep);
                           }
                         }}
                       />
@@ -1408,7 +1568,7 @@ function App() {
                         onClick={() => {
                           const input = document.getElementById('jump-episode-input') as HTMLInputElement;
                           const ep = parseInt(input.value);
-                          if (ep > 0) playEpisode(selectedAnime.title, ep);
+                          if (ep > 0) playEpisode(selectedAnime.title, selectedAnime.title_original, ep);
                         }}
                       >
                         Play
@@ -1417,19 +1577,31 @@ function App() {
 
                     <div className="episodes-grid">
                       {selectedAnime.episodes === 1 ? (
-                        <button className="episode-grid-btn" onClick={() => playEpisode(selectedAnime.title, 1)}>
+                        <button className="episode-grid-btn" onClick={() => playEpisode(selectedAnime.title, selectedAnime.title_original, 1)}>
                           1 (Movie)
                         </button>
                       ) : (
                         Array.from({ length: Math.min(100, (selectedAnime.episodes || 1200) - episodePage * 100) }).map((_, i) => {
                           const epNum = episodePage * 100 + i + 1;
                           return (
-                            <button key={epNum} className="episode-grid-btn" onClick={() => playEpisode(selectedAnime.title, epNum)}>
+                            <button key={epNum} className="episode-grid-btn" onClick={() => playEpisode(selectedAnime.title, selectedAnime.title_original, epNum)}>
                               {epNum}
                             </button>
                           );
                         })
                       )}
+                    </div>
+                    
+                    <div className="anikoto-settings-item">
+                      <span className="anikoto-settings-label">Source</span>
+                      <select 
+                        className="anikoto-settings-select"
+                        value={provider}
+                        onChange={(e) => setProvider(e.target.value)}
+                      >
+                        <option value="anidb">Anidb (Default)</option>
+                        <option value="anikoto">Anikoto</option>
+                      </select>
                     </div>
                   </div>
                 </div>
@@ -1470,6 +1642,46 @@ function App() {
         </div>
       )}
       {/* Launching Player Toast */}
+      {errorMessage && (
+        <div onClick={() => setErrorMessage(null)} style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.8)',
+          backdropFilter: 'blur(8px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+          padding: '20px'
+        }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background: 'var(--surface)',
+            border: '1px solid rgba(255,255,255,0.1)',
+            borderRadius: '16px',
+            maxWidth: '450px', 
+            width: '100%',
+            textAlign: 'center', 
+            padding: '32px 24px',
+            boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)'
+          }}>
+            <div style={{width: '64px', height: '64px', borderRadius: '50%', background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px auto'}}>
+              <AlertCircle size={32} />
+            </div>
+            <h2 style={{fontSize: '1.5rem', fontWeight: '700', marginBottom: '12px', color: '#f8fafc'}}>Playback Error</h2>
+            <p style={{fontSize: '1.05rem', color: 'var(--text-secondary)', lineHeight: '1.6', marginBottom: '28px'}}>
+              {errorMessage}
+            </p>
+            <button 
+              className="btn-primary" 
+              style={{width: '100%', padding: '14px', borderRadius: '12px', fontSize: '1.05rem', fontWeight: '600'}}
+              onClick={() => setErrorMessage(null)}
+            >
+              Okay, got it
+            </button>
+          </div>
+        </div>
+      )}
+
       {toastMessage && (
         <div style={{
           position: 'fixed',

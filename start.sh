@@ -3,7 +3,7 @@
 
 echo "Starting FastAPI backend on port 8000..."
 source venv/bin/activate
-uvicorn api:app --host 0.0.0.0 --port 8000 &
+uvicorn api:app --host 0.0.0.0 --port 8000 "$@" &
 API_PID=$!
 
 echo "Starting Vite frontend..."

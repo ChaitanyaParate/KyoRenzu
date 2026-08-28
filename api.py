@@ -7,13 +7,15 @@ import io
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 import os
 import uvicorn
 import sqlite3
 import httpx
 import json
 import time
+import cloudscraper
+import re
 import asyncio
 import subprocess
 
@@ -41,10 +43,82 @@ def init_db():
             conn.execute("ALTER TABLE user_library ADD COLUMN worth_level TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass # Column already exists
+        
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mal_id INTEGER,
+                title TEXT,
+                episode INTEGER,
+                message TEXT,
+                is_read INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(mal_id, episode)
+            )
+        """)
+
+async def notification_worker():
+    while True:
+        try:
+            with sqlite3.connect("user_library.db") as conn:
+                conn.row_factory = sqlite3.Row
+                watching = conn.execute("SELECT mal_id, episodes_watched FROM user_library WHERE status = 'Watching'").fetchall()
+            
+            if watching:
+                mal_ids = [row["mal_id"] for row in watching]
+                watched_map = {row["mal_id"]: row["episodes_watched"] for row in watching}
+                
+                query = """
+                query ($in: [Int]) {
+                  Page(page: 1, perPage: 50) {
+                    media(idMal_in: $in, type: ANIME, status: RELEASING) {
+                      idMal
+                      title { romaji english }
+                      nextAiringEpisode {
+                        episode
+                      }
+                      episodes
+                    }
+                  }
+                }
+                """
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post("https://graphql.anilist.co", json={"query": query, "variables": {"in": mal_ids}})
+                    if resp.status_code == 200:
+                        media_list = resp.json().get('data', {}).get('Page', {}).get('media', [])
+                        with sqlite3.connect("user_library.db") as conn:
+                            for media in media_list:
+                                mal_id = media.get('idMal')
+                                title = media.get('title', {}).get('english') or media.get('title', {}).get('romaji')
+                                next_airing = media.get('nextAiringEpisode')
+                                episodes = media.get('episodes')
+                                
+                                current_ep = None
+                                if next_airing:
+                                    current_ep = next_airing.get('episode') - 1
+                                elif episodes:
+                                    current_ep = episodes
+                                
+                                if current_ep and current_ep > 0 and current_ep > watched_map.get(mal_id, 0):
+                                    # Insert notification for this episode
+                                    try:
+                                        msg = f"Episode {current_ep} of {title} is now available!"
+                                        conn.execute(
+                                            "INSERT INTO notifications (mal_id, title, episode, message) VALUES (?, ?, ?, ?)",
+                                            (mal_id, title, current_ep, msg)
+                                        )
+                                        conn.commit()
+                                    except sqlite3.IntegrityError:
+                                        pass # Already notified
+        except Exception as e:
+            print(f"Notification worker error: {e}")
+            
+        await asyncio.sleep(600)  # Poll every 10 minutes
 
 @app.on_event("startup")
 async def startup_event():
     init_db()
+    asyncio.create_task(notification_worker())
 
 app.add_middleware(
     CORSMiddleware,
@@ -257,15 +331,15 @@ def get_library_sqlite():
 _LIBRARY_CACHE = None
 _LIBRARY_CACHE_TIME = 0
 
-def get_local_paths_for_mal_id(mal_id: int):
+def get_local_data_for_mal_id(mal_id: int):
     conn = sqlite3.connect('anime_data.db')
     c = conn.cursor()
-    c.execute("SELECT local_image_path, theme_local_path FROM anime WHERE mal_id = ?", (mal_id,))
+    c.execute("SELECT local_image_path, theme_local_path, episodes, members FROM anime WHERE mal_id = ?", (mal_id,))
     row = c.fetchone()
     conn.close()
     if row:
-        return row[0], row[1]
-    return None, None
+        return row[0], row[1], row[2], row[3]
+    return None, None, None, None
 
 @app.get("/api/library")
 async def get_library():
@@ -278,10 +352,10 @@ async def get_library():
         try:
             hero_animes = []
             categories = [
-                {"id": 1, "name": "Action"},
-                {"id": 22, "name": "Romance"},
-                {"id": 4, "name": "Comedy"},
-                {"id": 24, "name": "Sci-Fi"}
+                {"id": "recent", "name": "Recently Updated", "sort": "UPDATED_AT_DESC", "status": "RELEASING"},
+                {"id": "upcoming", "name": "Upcoming Anime", "sort": "POPULARITY_DESC", "status": "NOT_YET_RELEASED"},
+                {"id": "new", "name": "New Release", "sort": "START_DATE_DESC", "status": "RELEASING"},
+                {"id": "completed", "name": "Just Completed", "sort": "END_DATE_DESC", "status": "FINISHED"}
             ]
             library_data = []
             
@@ -300,6 +374,8 @@ async def get_library():
                       seasonYear
                       description
                       averageScore
+                      format
+                      popularity
                     }
                   }
                 }
@@ -315,7 +391,7 @@ async def get_library():
                     
                     mal_id = item.get('idMal')
                     if not mal_id: continue
-                    local_image, local_theme = get_local_paths_for_mal_id(mal_id)
+                    local_image, local_theme, local_episodes, local_members = get_local_data_for_mal_id(mal_id)
                     cover_url = f"http://localhost:8000/covers/{os.path.basename(local_image)}" if local_image else item.get('coverImage', {}).get('extraLarge')
                     theme_url = f"http://localhost:8000/themes/{os.path.basename(local_theme)}" if local_theme else None
                     
@@ -329,7 +405,9 @@ async def get_library():
                         "genres": ", ".join(item.get('genres', [])),
                         "synopsis": synopsis,
                         "year": item.get('seasonYear'),
-                        "episodes": item.get('episodes'),
+                        "episodes": item.get('episodes') or local_episodes,
+                        "type": item.get('format'),
+                        "members": local_members or item.get('popularity'),
                         "cover_url": cover_url,
                         "banner_url": item.get('bannerImage'),
                         "theme_url": theme_url
@@ -338,9 +416,9 @@ async def get_library():
                 
                 # 2. Fetch Categories via AniList
                 cat_query = """
-                query ($genre: String) {
+                query ($sort: [MediaSort], $status: MediaStatus) {
                   Page(page: 1, perPage: 15) {
-                    media(sort: POPULARITY_DESC, type: ANIME, genre: $genre) {
+                    media(sort: $sort, type: ANIME, status: $status) {
                       idMal
                       title { romaji english }
                       coverImage { extraLarge }
@@ -350,12 +428,14 @@ async def get_library():
                       seasonYear
                       description
                       averageScore
+                      format
+                      popularity
                     }
                   }
                 }
                 """
                 for cat in categories:
-                    resp = await client.post("https://graphql.anilist.co", json={"query": cat_query, "variables": {"genre": cat["name"]}})
+                    resp = await client.post("https://graphql.anilist.co", json={"query": cat_query, "variables": {"sort": [cat["sort"]], "status": cat["status"]}})
                     resp.raise_for_status()
                     data = resp.json().get('data', {}).get('Page', {}).get('media', [])
                     
@@ -363,7 +443,7 @@ async def get_library():
                     for item in data:
                         mal_id = item.get('idMal')
                         if not mal_id: continue
-                        local_image, local_theme = get_local_paths_for_mal_id(mal_id)
+                        local_image, local_theme, local_episodes, local_members = get_local_data_for_mal_id(mal_id)
                         
                         cover_url = f"http://localhost:8000/covers/{os.path.basename(local_image)}" if local_image else item.get('coverImage', {}).get('extraLarge')
                         theme_url = f"http://localhost:8000/themes/{os.path.basename(local_theme)}" if local_theme else None
@@ -378,7 +458,9 @@ async def get_library():
                             "genres": ", ".join(item.get('genres', [])),
                             "synopsis": synopsis,
                             "year": item.get('seasonYear'),
-                            "episodes": item.get('episodes'),
+                            "episodes": item.get('episodes') or local_episodes,
+                            "type": item.get('format'),
+                            "members": local_members or item.get('popularity'),
                             "cover_url": cover_url,
                             "banner_url": item.get('bannerImage'),
                             "theme_url": theme_url
@@ -444,6 +526,36 @@ async def delete_user_library_item(mal_id: int):
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/anime/{mal_id}")
+def get_anime_details(mal_id: int):
+    conn = sqlite3.connect("anime_data.db")
+    conn.row_factory = sqlite3.Row
+    anime = conn.execute('SELECT * FROM anime WHERE mal_id = ?', (mal_id,)).fetchone()
+    conn.close()
+    if anime:
+        anime_dict = dict(anime)
+        if anime_dict.get('local_image_path'):
+            anime_dict['cover_url'] = f"http://localhost:8000/covers/{os.path.basename(anime_dict['local_image_path'])}"
+        else:
+            anime_dict['cover_url'] = anime_dict.get('image_url')
+        return anime_dict
+    raise HTTPException(status_code=404, detail="Anime not found")
+
+@app.get("/api/random")
+def get_random_anime():
+    conn = sqlite3.connect("anime_data.db")
+    conn.row_factory = sqlite3.Row
+    anime = conn.execute('SELECT * FROM anime ORDER BY RANDOM() LIMIT 1').fetchone()
+    conn.close()
+    if anime:
+        anime_dict = dict(anime)
+        if anime_dict.get('local_image_path'):
+            anime_dict['cover_url'] = f"http://localhost:8000/covers/{os.path.basename(anime_dict['local_image_path'])}"
+        else:
+            anime_dict['cover_url'] = anime_dict.get('image_url')
+        return anime_dict
+    raise HTTPException(status_code=404, detail="No anime found")
 
 @app.get("/api/user_library")
 async def get_user_library():
@@ -929,15 +1041,89 @@ async def get_recommendations(mal_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/play")
-async def play_episode(title: str, episode: int, dub: bool = False, quality: str = "best"):
-    cmd = ["./ani-cli-master/ani-cli", title, "-q", quality, "-S", "1", "-e", str(episode), "--exit-after-play"]
-    if dub:
-        cmd.append("--dub")
-    
-    env = os.environ.copy()
-    env["PATH"] = f"{os.path.expanduser('~')}/.local/bin:" + env.get("PATH", "")
-    
+async def play_episode(title: str, episode: int, alt_title: str = None, dub: bool = False, quality: str = "best", provider: str = "anidb"):
     try:
+        if provider == "anikoto":
+            raise HTTPException(status_code=501, detail="Anikoto scraper is under construction. Please use Anidb.")
+
+        # Pre-search logic to prevent wrong video playback
+        import urllib.parse
+        import difflib
+        import re
+        
+        env = os.environ.copy()
+        env["PATH"] = f"{os.path.expanduser('~')}/.local/bin:" + env.get("PATH", "")
+        
+        selection_index = 1
+        active_search_title = title
+        try:
+            # We'll search using the English title by default since Anidb is heavily English-indexed
+            search_query = title.replace(' ', '+')
+            search_url = f"https://anidb.app/browse?q={search_query}"
+            
+            curl_proc = await asyncio.create_subprocess_exec(
+                "curl_chrome116", "-sL", 
+                search_url,
+                env=env,
+                stdout=asyncio.subprocess.PIPE
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(curl_proc.communicate(), timeout=15.0)
+            except asyncio.TimeoutError:
+                curl_proc.kill()
+                raise HTTPException(status_code=504, detail="Pre-search validation timed out on Anidb.")
+                
+            html = stdout.decode('utf-8', errors='ignore').replace('\n', ' ')
+            
+            matches = re.findall(r'anime/[a-z0-9-]+-[0-9]+".*?alt="([^"]+)"', html)
+            if not matches:
+                # Fallback: Try searching with alt_title if initial search yields 0 results
+                if alt_title:
+                    active_search_title = alt_title
+                    search_query = alt_title.replace(' ', '+')
+                    search_url = f"https://anidb.app/browse?q={search_query}"
+                    curl_proc = await asyncio.create_subprocess_exec(
+                        "curl_chrome116", "-sL", search_url, env=env, stdout=asyncio.subprocess.PIPE
+                    )
+                    try:
+                        stdout, _ = await asyncio.wait_for(curl_proc.communicate(), timeout=15.0)
+                    except asyncio.TimeoutError:
+                        curl_proc.kill()
+                        raise HTTPException(status_code=504, detail="Pre-search validation timed out on Anidb.")
+                    html = stdout.decode('utf-8', errors='ignore').replace('\n', ' ')
+                    matches = re.findall(r'anime/[a-z0-9-]+-[0-9]+".*?alt="([^"]+)"', html)
+                    
+                if not matches:
+                    raise HTTPException(status_code=404, detail=f"Anime '{title}' not found on Anidb (0 search results).")
+                
+            best_idx = 1
+            best_ratio = 0
+            best_title = ""
+            for i, anidb_title in enumerate(matches):
+                clean_title = anidb_title.replace('&#039;', "'").replace('&quot;', '"').replace('&amp;', '&')
+                ratio1 = difflib.SequenceMatcher(None, title.lower(), clean_title.lower()).ratio()
+                ratio2 = difflib.SequenceMatcher(None, alt_title.lower(), clean_title.lower()).ratio() if alt_title else 0
+                ratio = max(ratio1, ratio2)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_idx = i + 1
+                    best_title = clean_title
+            
+            if best_ratio < 0.6:
+                raise HTTPException(status_code=404, detail=f"Anime '{title}' not found. Closest match was '{best_title}' ({best_ratio:.0%} similarity).")
+            selection_index = best_idx
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"Pre-search validation failed: {e}")
+
+        # Execute ani-cli with the validated selection index and the search string that matched
+        cmd = ["./ani-cli-master/ani-cli", active_search_title, "-q", quality, "-S", str(selection_index), "-e", str(episode), "--exit-after-play"]
+        if dub:
+            cmd.append("--dub")
+        
+        env = os.environ.copy()
+        env["PATH"] = f"{os.path.expanduser('~')}/.local/bin:" + env.get("PATH", "")
         # Run process asynchronously so we don't block the API
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -946,10 +1132,10 @@ async def play_episode(title: str, episode: int, dub: bool = False, quality: str
             stderr=asyncio.subprocess.STDOUT
         )
         
-        # Read output for up to 10 seconds to catch early errors (like "No results found")
+        # Read output for up to 45 seconds to catch early errors (like "No results found")
         error_log = []
         try:
-            async with asyncio.timeout(10.0):
+            async with asyncio.timeout(45.0):
                 while True:
                     line = await process.stdout.readline()
                     if not line:
@@ -958,7 +1144,7 @@ async def play_episode(title: str, episode: int, dub: bool = False, quality: str
                     error_log.append(decoded_line)
                     
                     # If ani-cli successfully scraped and is launching mpv, it prints this:
-                    if "Playing episode" in decoded_line:
+                    if "Playing episode" in decoded_line or "anidb.app links fetched" in decoded_line or "Downloading" in decoded_line:
                         return {"status": "playing", "message": f"Launching player for {title} Episode {episode}"}
                         
         except asyncio.TimeoutError:
@@ -979,6 +1165,30 @@ async def play_episode(title: str, episode: int, dub: bool = False, quality: str
         raise
     except Exception as e:
         traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/notifications")
+async def get_notifications():
+    try:
+        with sqlite3.connect("user_library.db") as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM notifications ORDER BY created_at DESC LIMIT 50").fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class ReadNotificationRequest(BaseModel):
+    notification_ids: list[int]
+
+@app.post("/api/notifications/read")
+async def mark_notifications_read(req: ReadNotificationRequest):
+    try:
+        with sqlite3.connect("user_library.db") as conn:
+            for nid in req.notification_ids:
+                conn.execute("UPDATE notifications SET is_read = 1 WHERE id = ?", (nid,))
+            conn.commit()
+            return {"success": True}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

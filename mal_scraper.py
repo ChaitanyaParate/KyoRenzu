@@ -311,49 +311,7 @@ async def fetch_kitsu(session, mal_id, sem):
                 continue
         return None
 
-async def fetch_animethemes(session, mal_id, sem):
-    async with sem:
-        for attempt in range(MAX_RETRIES):
-            await asyncio.sleep(1.0 / ANIMETHEMES_RATE_LIMIT)
-            url = f"{ANIMETHEMES_URL}?filter[site]=MyAnimeList&filter[external_id]={mal_id}"
-            try:
-                async with session.get(url, timeout=15) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        anime_list = data.get('anime', [])
-                        if not anime_list:
-                            return None
-                        
-                        attrs = anime_list[0]
-                        desc = attrs.get('synopsis')
-                        if not desc:
-                            return None
-
-                        season_str = attrs.get('season')
-                        season = season_str.upper() if season_str else None
-                        
-                        return {
-                            'anilist_id': None,
-                            'synopsis': desc,
-                            'episodes': None,
-                            'year': attrs.get('year'),
-                            'season': season,
-                            'status': None,
-                            'studio': None,
-                            'genres': None,
-                            'data_source': 'animethemes'
-                        }
-                    elif response.status == 429:
-                        await asyncio.sleep(2 ** attempt)
-                        continue
-                    else:
-                        return None
-            except Exception:
-                await asyncio.sleep(2 ** attempt)
-                continue
-        return None
-
-async def tiered_fetch(session, mal_id, anilist_sem, jikan_sem, kitsu_sem, animethemes_sem):
+async def tiered_fetch(session, mal_id, anilist_sem, jikan_sem, kitsu_sem):
     merged_data = {}
     
     def merge_result(res):
@@ -365,10 +323,6 @@ async def tiered_fetch(session, mal_id, anilist_sem, jikan_sem, kitsu_sem, anime
     def has_all_fields():
         required = ['synopsis', 'anilist_id', 'episodes', 'year', 'season', 'status', 'studio', 'genres']
         return all(merged_data.get(k) for k in required)
-
-    res = await fetch_animethemes(session, mal_id, animethemes_sem)
-    merge_result(res)
-    if has_all_fields(): return mal_id, merged_data
 
     res = await fetch_anilist(session, mal_id, anilist_sem)
     merge_result(res)
@@ -386,45 +340,25 @@ async def tiered_fetch(session, mal_id, anilist_sem, jikan_sem, kitsu_sem, anime
         
     return mal_id, merged_data
 
-async def process_batch_enrich(session, records, conn, c, anilist_sem, jikan_sem, kitsu_sem, animethemes_sem, pbar):
-    async def fetch_and_update(mal_id):
-        res = await tiered_fetch(session, mal_id, anilist_sem, jikan_sem, kitsu_sem, animethemes_sem)
-        pbar.update(1)
-        return res
-
-    tasks = [fetch_and_update(mal_id) for mal_id, in records]
-    results = await asyncio.gather(*tasks)
+def _worker_process_chunk(chunk):
+    """Runs in a separate process to fetch a chunk of mal_ids concurrently."""
+    import asyncio
+    import aiohttp
+    
+    async def run(records):
+        # We can increase semaphores slightly since we are chunked, but APIs still rate limit per IP.
+        # Keeping them at 1 per process means N concurrent requests globally (where N = num_workers).
+        anilist_sem = asyncio.Semaphore(1)
+        jikan_sem = asyncio.Semaphore(1)
+        kitsu_sem = asyncio.Semaphore(1)
         
-    updates = []
-    genre_updates = []
-    for mal_id, data in results:
-        if data.get('data_source') == 'none':
-            updates.append((None, None, None, None, None, None, None, 'none', mal_id))
-        else:
-            updates.append((
-                data.get('anilist_id'), data.get('synopsis'), data.get('episodes'),
-                data.get('year'), data.get('season'), data.get('status'),
-                data.get('studio'), data.get('data_source'), mal_id
-            ))
-            if data.get('genres'):
-                genre_updates.append((data.get('genres'), mal_id))
+        async with aiohttp.ClientSession() as session:
+            tasks = [tiered_fetch(session, mal_id[0], anilist_sem, jikan_sem, kitsu_sem) for mal_id in records]
+            return await asyncio.gather(*tasks)
             
-    if updates:
-        c.executemany('''
-            UPDATE anime SET 
-                anilist_id = ?, synopsis = ?, episodes = ?, year = ?, 
-                season = ?, status = ?, studio = ?, data_source = ?
-            WHERE mal_id = ?
-        ''', updates)
-        
-    if genre_updates:
-        c.executemany('''
-            UPDATE anime SET genres = ? WHERE mal_id = ? AND (genres IS NULL OR genres = '')
-        ''', genre_updates)
-        
-    conn.commit()
+    return asyncio.run(run(chunk))
 
-async def enrich_metadata(limit=None):
+def enrich_metadata(limit=None):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("SELECT mal_id FROM anime WHERE data_source = 'kaggle_base' OR data_source IS NULL OR status IS NULL OR anilist_id IS NULL OR studio IS NULL")
@@ -438,18 +372,52 @@ async def enrich_metadata(limit=None):
         records = records[:limit]
         print(f"Limiting to {limit} records.")
 
-    print(f"Starting tiered pipeline to enrich {len(records)} anime...")
-    anilist_sem = asyncio.Semaphore(1)
-    jikan_sem = asyncio.Semaphore(1)
-    kitsu_sem = asyncio.Semaphore(1)
-    animethemes_sem = asyncio.Semaphore(1)
+    print(f"Starting tiered pipeline to enrich {len(records)} anime using multiprocessing...")
     
-    batch_size = 50
-    async with aiohttp.ClientSession() as session:
-        with tqdm(total=len(records), desc="Tiered Fetch") as pbar:
-            for i in range(0, len(records), batch_size):
-                batch_records = records[i:i+batch_size]
-                await process_batch_enrich(session, batch_records, conn, c, anilist_sem, jikan_sem, kitsu_sem, animethemes_sem, pbar)
+    import multiprocessing
+    
+    chunk_size = 5
+    chunks = [records[i:i + chunk_size] for i in range(0, len(records), chunk_size)]
+    num_workers = min(multiprocessing.cpu_count(), 4)
+    
+    print(f"Spawning {num_workers} subprocesses to fetch {len(chunks)} chunks...")
+
+    with multiprocessing.Pool(processes=num_workers) as pool:
+        for results in tqdm(pool.imap_unordered(_worker_process_chunk, chunks), total=len(chunks), desc="Enriching (Chunks)"):
+            updates = []
+            genre_updates = []
+            for mal_id, data in results:
+                if data.get('data_source') == 'none':
+                    updates.append((None, None, None, None, None, None, None, 'none', mal_id))
+                else:
+                    updates.append((
+                        data.get('anilist_id'), data.get('synopsis'), data.get('episodes'),
+                        data.get('year'), data.get('season'), data.get('status'),
+                        data.get('studio'), data.get('data_source'), mal_id
+                    ))
+                    if data.get('genres'):
+                        genre_updates.append((data.get('genres'), mal_id))
+                    
+            if updates:
+                c.executemany('''
+                    UPDATE anime SET 
+                        anilist_id = COALESCE(?, anilist_id), 
+                        synopsis = COALESCE(?, synopsis), 
+                        episodes = COALESCE(?, episodes), 
+                        year = COALESCE(?, year), 
+                        season = COALESCE(?, season), 
+                        status = COALESCE(?, status), 
+                        studio = COALESCE(?, studio), 
+                        data_source = ?
+                    WHERE mal_id = ?
+                ''', updates)
+                
+            if genre_updates:
+                c.executemany('''
+                    UPDATE anime SET genres = ? WHERE mal_id = ? AND (genres IS NULL OR genres = '')
+                ''', genre_updates)
+                
+            conn.commit()
 
     conn.close()
     print("Metadata enrichment complete!")
@@ -539,7 +507,7 @@ async def download_covers():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MyAnimeList Universal Scraper")
     parser.add_argument("--scrape-base", action="store_true", help="Scrape top anime base metadata from Kitsu API")
-    parser.add_argument("--enrich-metadata", action="store_true", help="Fetch detailed metadata/synopses via AnimeThemes->AniList->Jikan->Kitsu tiered pipeline")
+    parser.add_argument("--enrich-metadata", action="store_true", help="Fetch detailed metadata/synopses via AniList->Jikan->Kitsu tiered pipeline using multiprocessing")
     parser.add_argument("--download-covers", action="store_true", help="Download missing cover images locally with Kitsu fallback")
     parser.add_argument("--all", action="store_true", help="Run the entire pipeline (Base -> Enrich -> Covers)")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of items processed in enrichment phase")
@@ -551,7 +519,7 @@ if __name__ == "__main__":
         asyncio.run(scrape_base())
     
     if args.enrich_metadata or args.all:
-        asyncio.run(enrich_metadata(args.limit))
+        enrich_metadata(args.limit)
 
     if args.download_covers or args.all:
         asyncio.run(download_covers())
