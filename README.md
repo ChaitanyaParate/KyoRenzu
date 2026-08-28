@@ -1,395 +1,126 @@
-# 🎌 Judging Anime By Its Cover
+# 🎌 Judging Anime By Its Cover (Anikoto Platform)
 
 > *"Don't judge a book by its cover"* — but we absolutely will judge anime by theirs.
 
-A **multimodal AI anime recommendation engine** that combines **OpenAI CLIP visual embeddings** of cover artwork with **SentenceTransformer semantic plot embeddings** of synopses, blended through a weighted dual-vector scoring system. Ask for anime that *looks like Death Note* but has *a relaxing slice-of-life plot* — and the engine will find the perfect intersection.
+Welcome to **Judging Anime By Its Cover**, a next-generation **multimodal AI anime recommendation engine** and **full-stack streaming platform**. This project evolved from a machine-learning research tool into a full-fledged Netflix-style streaming application (Anikoto) with native OS integration.
+
+## ✨ Epic Feature Overview
+
+### 1. 🖥️ The Anikoto Web Platform
+- **High-Fidelity React UI**: A stunning, modern, responsive frontend built with React and Vite. Features a dark-mode glassmorphic aesthetic inspired by premium streaming services.
+- **FastAPI Backend**: A lightning-fast Python API bridging the gap between the React frontend, the local SQLite database, and our heavy ML recommendation engines.
+- **Dynamic Hero Banners**: Automatically rotating featured anime banners with HD video playback and details integration.
+
+### 2. 🍿 Native Video Streaming (`ani-cli` Integration)
+- **Zero-Ad Streaming**: Watch any anime natively on your desktop! By integrating [ani-cli](https://github.com/pystardust/ani-cli), clicking "Play Now" securely launches the `mpv` video player directly on your host machine.
+- **No Browser Overhead**: Streams bypass the browser entirely, piping direct HTTP video streams to your local GPU-accelerated video player.
+
+### 3. 🧠 Multimodal AI Recommendation Engine
+Our flagship AI engine can find anime that *looks like Death Note* but has *a relaxing slice-of-life plot*!
+- **🖼️ Visual Cover Matching**: Uses **OpenAI CLIP (ViT-Large/14)** to embed 30,000+ anime cover images into 768-dimensional space. The system analyzes your watchlist and builds a "Visual Taste Vector".
+- **📖 Semantic Plot Matching**: Uses **SentenceTransformer (`all-MiniLM-L6-v2`)** to embed 20,000+ synopses. You can type natural language plots (e.g., "space bounty hunters") to find semantic matches.
+- **⚖️ Worth Level Weighting**: Anime you rated highly pull the recommendation vector closer to their aesthetic, while low-rated anime gently steer it away.
+- **🎭 Genre Co-Occurrence Matrix**: A statistical correlation table built from 30,000 anime automatically soft-matches related genres (e.g., if you ask for Mecha, it knows to look for Sci-Fi).
+
+### 4. 📚 Personal Library & Notifications
+- **Watchlist Tracking**: Add anime to your library, update your watch status (Watching, Completed, Plan to Watch), and score them.
+- **AniList Sync & Airing Notifications**: The backend runs an asynchronous background worker that polls the AniList GraphQL API for any anime you are currently "Watching". If a new episode airs, you get a native notification in the app's bell icon!
+
+### 5. 🕷️ Tiered Data Scraping Pipeline
+- A robust, multiprocessing data pipeline (`mal_scraper.py`) that builds a local 30,000+ anime database from scratch.
+- **Tiered Fallback Enrichment**: Extracts metadata first from AniList (GraphQL), falls back to Jikan (MyAnimeList REST API), and finally Kitsu to guarantee 100% metadata coverage.
 
 ---
 
-## ✨ Feature Overview
+## 🚀 Getting Started
 
-| Feature | Description |
-|---|---|
-| 🖼️ Visual Cover Matching | CLIP embeds 30k+ anime cover images; finds visually similar aesthetics |
-| 📖 Semantic Plot Matching | SentenceTransformer embeds 19,490+ synopses; semantic search over plot summaries |
-| 🎭 Genre Co-Occurrence Scoring | Statistical correlation table built from 30k anime, soft-matches related genres |
-| 📅 Era Proximity Scoring | Gaussian decay rewards candidates close to your preferred release year |
-| ⭐ Worth Level Weighting | High-rated entries in your watchlist influence the query 1.5× more |
-| 🔍 Tiered Metadata Pipeline | AniList GraphQL → Jikan fallback for robust metadata collection |
-| 🖥️ High-Fidelity Web UI | React/Vite frontend (Anikoto clone) and FastAPI backend for browsing and searching |
-| 📊 CSV / Excel input | Parses your exported watchlist file automatically |
+### 1. Prerequisites
+- Python 3.10+
+- Node.js 18+ (for Vite frontend)
+- [mpv](https://mpv.io/) (required for native video playback via `ani-cli`)
+- `curl`, `grep`, `fzf` (standard Linux/macOS utils for `ani-cli`)
 
----
-
-## 🧠 How It Works — Full Pipeline
-
-### Step 1 — Building Your Visual Taste Profile
-
-You provide a list of anime you've enjoyed (as a CSV, Excel file, or comma-separated terminal input). The system:
-
-1. **Fuzzy-matches** each title to a MAL ID using `rapidfuzz` against the local SQLite database — handling typos, alternate titles, and partial matches gracefully.
-2. **Loads the CLIP cover embedding** for each matched anime from `cover_embeddings.npy`.
-3. **Applies Worth Level weighting** (if your CSV has a `Worth Level` column): `High = 1.5×`, `Medium = 1.0×`, `Low = 0.3×` — so anime you loved have a stronger pull on your taste vector.
-4. **Averages all weighted embeddings** into a single 768-dimensional **visual taste vector** representing your aesthetic fingerprint.
-
-### Step 2 — Blending with Preference Text (Optional)
-
-If you provide a `--preference` text (e.g., `"dark psychological thriller"`), the system:
-
-1. Extracts **genre keywords** from the text using `preference_encoder.py` and injects matching anime directly into the candidate pool (genre injection).
-2. Embeds the preference text using **CLIP's text encoder** into the same 768-d space.
-3. **Blends** the visual taste vector `70%` with the text embedding `30%` to produce the final query vector.
-
-### Step 3 — Semantic Plot Search (Optional)
-
-If you provide a `--plot-preference` text (e.g., `"relaxing slice of life about school friends"`), the system:
-
-1. Encodes your plot text using **`all-MiniLM-L6-v2`** (SentenceTransformers) into a 384-d plot vector.
-2. Computes **cosine similarity** between your plot vector and 19,490+ pre-embedded anime synopses stored in `synopsis_embeddings.npy`.
-3. The resulting per-anime **plot similarity score** is injected into the final ranking formula.
-
-### Step 4 — Multi-Modal Cosine Similarity Search
-
-The blended query vector is compared against all 30,000+ anime cover embeddings using **NumPy batched cosine similarity** to produce the top-N visual candidates efficiently.
-
-### Step 5 — Multi-Dimensional Re-Ranking
-
-Every visual candidate is scored by a **weighted sum of five components**:
-
-| Component | Weight | Description |
-|---|---|---|
-| 🖼️ Visual Similarity | **60%** | CLIP cosine similarity of your taste vector to the candidate's cover embedding |
-| 📖 Plot Similarity | **30%** | SentenceTransformer cosine similarity (only applied when `--plot-preference` is provided) |
-| ⭐ MAL Score | **28%** | Community rating from MyAnimeList (normalized 0–1) |
-| 👥 Popularity | **17%** | Number of MAL members (normalized 0–1) |
-| 🎭 Genre Relevance | **25%** | Co-occurrence correlation score (0 if no genre filter or below threshold) |
-| 📅 Era Proximity | **10%** | Gaussian score centered on preferred release year |
-
-> **Note:** When `--plot-preference` is not provided, plot similarity weight is 0 and the visual weight retains its full 60% allocation.
-
-### Step 6 — Post-Filtering
-
-The top results are post-filtered to exclude any anime already in your input watchlist using fuzzy title matching (threshold: 78), re-ranked, and trimmed to your requested `--top-n` count.
-
----
-
-## 🚀 Quick Demo
-
-```bash
-# Start the full web application (FastAPI Backend + React Frontend)
-./start.sh
-
-# The application will be available at:
-# Frontend: http://localhost:5173
-# API Docs: http://localhost:8000/docs
-```
-
-Or you can use the CLI tool directly:
-
-```bash
-# Simple visual match from a CSV watchlist
-python recommend.py --input Ani.csv
-
-# Add a mood/aesthetic preference
-python recommend.py --input Ani.csv --preference "dark psychological thriller"
-```
-
-### Sample Output (Dual-Vector Mode)
-
-```
-╔═════╤════════════════════════╤═════════╤═══════════╤══════════════════════════════╤══════════╤══════════╗
-║  #  │ Title                  │   MAL   │  Members  │ Genres                       │  Visual  │   Plot   ║
-║     │                        │  Score  │           │                              │   Sim    │   Sim    ║
-╟─────┼────────────────────────┼─────────┼───────────┼──────────────────────────────┼──────────┼──────────╢
-║  1  │ Charlotte              │  7.76   │ 1,769,199 │ Drama, School, Super Power   │  0.858   │  0.381   ║
-╟─────┼────────────────────────┼─────────┼───────────┼──────────────────────────────┼──────────┼──────────╢
-║  2  │ Toradora!              │  8.04   │ 2,371,441 │ Drama, Romance, School       │  0.856   │  0.406   ║
-╟─────┼────────────────────────┼─────────┼───────────┼──────────────────────────────┼──────────┼──────────╢
-║  3  │ Gabriel DropOut        │  7.42   │   485,220 │ Comedy, CGDCT, School        │  0.782   │  0.392   ║
-╚═════╧════════════════════════╧═════════╧═══════════╧══════════════════════════════╧══════════╧══════════╝
-```
-
----
-
-## 🔧 CLI Options Reference
-
-```
-python recommend.py --input <source> [options]
-```
-
-| Flag | Short | Type | Default | Description |
-|---|---|---|---|---|
-| `--input` | `-i` | str | *required* | CSV/Excel file path, or comma-separated anime title list |
-| `--preference` | `-p` | str | None | Free-text aesthetic/mood preference (e.g. `"dark psychological"`) |
-| `--plot-preference` | | str | None | Semantic plot preference to activate dual-vector mode (e.g. `"relaxing school slice of life"`) |
-| `--top-n` | `-n` | int | 6 | Number of recommendations to return |
-| `--candidates` | | int | auto | Number of visual candidates fetched before re-ranking (default auto-scales with input size) |
-| `--year` | `-y` | int | None | Preferred release year. Overrides era keywords and watchlist inference |
-
----
-
-## 🛠️ Setup
-
-### 1. Clone the Repository
+### 2. Clone the Repository
 ```bash
 git clone https://github.com/ChaitanyaParate/Judging-Anime-By-Its-Cover.git
 cd Judging-Anime-By-Its-Cover
 ```
 
-### 2. Create & Activate Virtual Environment
+### 3. Backend Setup
 ```bash
+# Create and activate a virtual environment
 python -m venv venv
-source venv/bin/activate        # Linux / macOS
-# venv\Scripts\activate         # Windows
-```
+source venv/bin/activate
 
-### 3. Install Dependencies
-```bash
+# Install Python dependencies
 pip install -r requirements.txt
 ```
 
-### 4. Download the CLIP Model (One-Time, ~1.2 GB)
+### 4. Frontend Setup
 ```bash
-python -c "
-from transformers import CLIPModel, CLIPProcessor
-model = CLIPModel.from_pretrained('openai/clip-vit-large-patch14')
-processor = CLIPProcessor.from_pretrained('openai/clip-vit-large-patch14')
-model.save_pretrained('models/clip-vit-large-patch14')
-processor.save_pretrained('models/clip-vit-large-patch14')
-print('Done!')
-"
+cd web
+npm install
+cd ..
 ```
 
-The `all-MiniLM-L6-v2` SentenceTransformer model (~90 MB) is automatically downloaded from HuggingFace on first use of plot embeddings.
+### 5. Download the Database & Models
+All large files (embeddings, the 30k+ SQLite DB, and covers) are hosted on Google Drive to save you hours of scraping and embedding.
+- **`anime_data.db`**: Place in the project root.
+- **`cover_embeddings.npy`** / **`synopsis_embeddings.npy`**: Place in the project root.
+- **`covers/` directory**: Extract the 30,000+ local JPEG covers into a folder named `covers/` in the project root.
 
-### 5. Download the Dataset
+*(See the [Drive Link](https://drive.google.com/drive/folders/1uK-QmsqDfnumBUYL23d8LFKXycOW-AWY?usp=sharing) for direct downloads).*
 
-All large files are hosted on **Google Drive** — including precomputed embeddings so you can skip the long embedding steps:
-
-📁 **[Google Drive — Anime Data & Embeddings](https://drive.google.com/drive/folders/1uK-QmsqDfnumBUYL23d8LFKXycOW-AWY?usp=sharing)**
-
-| File | Size | Description |
-|---|---|---|
-| `anime_data.db` | ~30 MB | SQLite database — 30,071 anime with metadata, synopses, and provider tracking |
-| `cover_embeddings.npy` | 88 MB | Precomputed CLIP 768-d cover embeddings |
-| `synopsis_embeddings.npy` | ~28 MB | Precomputed SentenceTransformer 384-d synopsis embeddings |
-| `covers.zip` | 2.5 GB | 30k+ anime cover images (JPEGs) |
-
-**Using gdown (recommended):**
+### 6. Run the Full Stack Application!
 ```bash
-pip install gdown
-gdown --folder https://drive.google.com/drive/folders/1uK-QmsqDfnumBUYL23d8LFKXycOW-AWY
-unzip covers.zip -d covers/
+# Run the startup script which launches FastAPI and Vite concurrently
+./start.sh --reload
 ```
-
-**Manual download:**
-1. Download all files from the Drive link above
-2. Place `anime_data.db`, `cover_embeddings.npy`, and `synopsis_embeddings.npy` in the project root
-3. Extract `covers.zip` → images should land in `covers/` in the project root
-
-### 6. Run Your First Recommendation
-
-```bash
-# CLI
-python recommend.py --input "Attack on Titan, Death Note" --preference "dark action"
-
-# Web GUI
-python gui.py
-# → open http://localhost:7860
-```
+The application will be available at **`http://localhost:5173`**.
 
 ---
 
-## 🔍 The Multi-Modal Search Engine
+## 🎮 How to Use the App
 
-This engine allows you to search across **three different modalities** simultaneously. You can use any combination of these flags:
+### The Home Tab
+- **Featured Banners**: Browse randomly selected popular/top-tier anime.
+- **Trending & Recommendations**: Scroll through "Top Anime" and your personalized AI recommendations.
+- **Random Anime / Shuffle**: Click the 🔀 shuffle icon in the top right header to instantly load a random anime from the database.
 
-| Flag | Modality | Description | Example |
-|------|----------|-------------|---------|
-| `--preference` (`-p`) | **Visual** | Searches by cover art aesthetics, and auto-extracts genres and era keywords. | `-p "dark psychological 90s thriller"` |
-| `--plot-preference` | **Semantic** | Searches by matching your prompt against the actual plot synopsis of the anime. | `--plot-preference "a story about space bounty hunters"` |
-| `--audio-preference` (`-a`) | **Audio** | Searches by the actual sound of the anime's Opening/Ending theme song via CLAP embeddings. | `-a "epic jazz trumpet"` |
+### The Search & Discover Tabs
+- **Global Search**: Use the top-nav search bar to quickly find anime by name.
+- **Deep Discovery**: Go to the Discover tab to use the **AI Engine**. 
+  - Type a **Visual Vibe** (e.g., "dark neo-noir").
+  - Type a **Plot Summary** (e.g., "kids trapped in a video game").
+  - The system will blend your inputs into vectors, scan 30,000 anime, and instantly return the best matches!
 
-### Combination Examples
+### The Library & Notifications
+- Go to the **Library Tab** to manage your watch status. You can export/import your library as CSV.
+- Keep an eye on the **Bell Icon** (🔔) in the header. The backend automatically tracks airing schedules for your "Watching" list and alerts you when a new episode drops!
 
-**1. The "Vibes" Search (URL Import + Visual + Audio)**
-Import your entire MyAnimeList profile, then find anime that *look* dark but *sound* jazzy:
-```bash
-python recommend.py -i "https://myanimelist.net/profile/Xinil" -p "dark neo-noir" -a "smooth jazz saxophone"
-```
-
-**2. The Hyper-Specific Search (CSV Watchlist + Plot + Audio + Era)**
-Pass in your local CSV/Excel list, and find a 2018 anime about camping with a relaxing acoustic theme song:
-```bash
-python recommend.py -i my_watchlist.csv --plot-preference "relaxing slice of life about camping" -a "calm acoustic guitar" -y 2018
-```
-
-**3. The Implicit Taste Search (Manual Listing)**
-Manually list out anime you like, and let the engine build a "Taste Vector" based entirely on their visual aesthetics and theme songs. This finds shows that naturally match your historical taste without any text prompts:
-```bash
-python recommend.py -i "Cowboy Bebop, Samurai Champloo, Baccano!"
-```
-
-**4. The Director's Cut (Manual Listing + Plot)**
-Combine a manual string input with a plot search to find something visually similar to Ghibli, but with a specific story:
-```bash
-python recommend.py -i "Spirited Away, Princess Mononoke" --plot-preference "a story about a flying castle"
-```
-
-**5. High-Candidate Broad Search (Excel Watchlist + Visual)**
-If you want to cast a wider net before filtering down, use an Excel file and increase the `--candidates` pool to 1000, requesting the top 10 results:
-```bash
-python recommend.py -i my_list.xlsx -p "colorful fantasy world" --candidates 1000 -n 10
-```
+### Playing an Anime
+- Click an anime card to open its details modal.
+- Click **"Play Now"** or an episode number in the episode grid.
+- Watch your terminal! `api.py` will invoke the local `ani-cli` submodule, search the web, bypass captchas, and seamlessly launch the stream in your native `mpv` player in full 1080p without ads!
 
 ---
 
-## 📂 Input Format
+## 🛠️ API & Architecture
 
-### 1. Direct URL Import (Recommended)
+### Backend (`api.py`)
+- `/api/library`: CRUD operations for your local user library.
+- `/api/recommendations/{mal_id}`: Triggers the `recommender.py` engine to perform a rapid cosine-similarity search against `cover_embeddings.npy` and `synopsis_embeddings.npy`.
+- `/api/play`: Constructs the `ani-cli` subprocess command, handling streaming logic natively.
+- `/api/random`: Rapid SQL `ORDER BY RANDOM()` endpoint.
+- `/api/notifications`: Returns the latest unread airing updates synced via AniList GraphQL.
 
-You can paste a public MyAnimeList or AniList profile URL directly. The engine will instantly fetch your anime list and use your personal scores to precisely weight your visual taste vector.
-
+### Scraping Engine (`mal_scraper.py`)
+Want to rebuild the database yourself?
 ```bash
-# MyAnimeList
-python recommend.py --input "https://myanimelist.net/profile/Xinil" --preference "dark psychological thriller"
-
-# AniList
-python recommend.py --input "https://anilist.co/user/AWC" --preference "relaxing slice of life"
+# Scrape everything from scratch (takes ~6-8 hours)
+python mal_scraper.py --all
 ```
-
-*Note: The engine natively excludes all anime you have on your imported list from the final recommendations.*
-
-### 2. CSV / Excel Watchlist
-
-Your file should have a column named `anime`, `title`, `name`, or `show`. Optionally add a `Worth Level` column:
-
-| No. | Anime | Ep. No. | Worth Level |
-|-----|-------|---------|-------------|
-| 1   | Death Note | 37 | High |
-| 2   | Sword Art Online | 96 | Medium |
-| 3   | Gamers! | 12 | Low |
-
-**Worth Level weights:** `High = 1.5×` &nbsp;|&nbsp; `Medium = 1.0×` &nbsp;|&nbsp; `Low = 0.3×`
-
-Titles are fuzzy-matched using `rapidfuzz.WRatio` so minor typos, alternate romanizations, and partial titles are handled gracefully.
-
-### 3. Terminal / Inline Input
-
-```bash
-python recommend.py --input "Naruto, Bleach, One Piece" --preference "long shonen epic"
-```
-
----
-
-## ⚙️ Scoring System — Deep Dive
-
-### Visual Taste Vector Construction
-
-The user's taste vector is a **weighted mean** of CLIP cover embeddings:
-
-```
-taste_vector = Σ(weight_i × embed_i) / Σ(weight_i)
-```
-
-Where `weight_i` comes from the Worth Level column. High-rated anime steer the query; Low-rated anime provide gentle directional input.
-
-The query vector is then blended with the CLIP text embedding of your `--preference`:
-
-```
-query_vector = 0.70 × taste_vector + 0.30 × text_embed(preference)
-```
-
-### Final Scoring Formula
-
-```
-final_score = (W_SIM  × visual_sim)
-            + (W_PLOT × plot_sim)       # only if --plot-preference provided
-            + (W_SCORE × norm_score)
-            + (W_POP  × norm_pop)
-            + (W_GENRE × genre_score)
-            + (W_ERA  × era_score)
-```
-
-Current weight values (tunable in `recommender.py`):
-
-```python
-W_SIM   = 0.60   # visual cover similarity
-W_PLOT  = 0.30   # semantic plot similarity
-W_SCORE = 0.28   # MAL community score (normalized)
-W_POP   = 0.17   # MAL member count (normalized)
-W_GENRE = 0.25   # genre co-occurrence relevance
-W_ERA   = 0.10   # Gaussian era proximity
-```
-
-### Genre Co-Occurrence Relevance
-
-Genre matching goes far beyond exact tag lookup. The system builds a **statistical co-occurrence correlation table** from all 30,000+ anime in the database at scrape time:
-
-```
-corr[(G, F)] = P(genre G | genre F)   # how often G appears when F is present
-```
-
-For each anime candidate:
-1. For every requested genre, all anime genres contribute a soft correlation score
-2. Scores are **normalized per anime** and aggregated using **geometric mean** across all requested genres — meaning the anime must score reasonably across *all* requested genres, not just one
-3. Anime scoring below `0.13` are **hard-zeroed** (genre component = 0)
-
-**Demographic genres** (Josei, Seinen, Shoujo, Shounen, Kids) use the **reversed** correlation direction to avoid inflation — e.g. asking "given this anime has Drama, how likely is it to be Josei?" rather than "what genres appear in Josei anime?"
-
-**Genre injection** ensures niche genre anime (Josei, Racing, etc.) always enter the candidate pool even if they look visually different from the user's average taste.
-
-### Era Proximity Scoring
-
-The system infers a **preferred release year** and rewards candidates close to it using a Gaussian decay (sigma = 8 years):
-
-```
-era_score = exp( -( (candidate_year − preferred_year) / 8 )² )
-```
-
-| Distance from target | Score |
-|---|---|
-| ±0 years | 1.00 |
-| ±8 years | 0.37 |
-| ±16 years | 0.02 |
-
-**Three ways to set the preferred year (highest priority first):**
-
-1. **`--year` flag / GUI number input** — explicit manual override
-   ```bash
-   python recommend.py --input Ani.csv --preference "action" --year 1998
-   ```
-2. **Era keyword in preference text** — auto-detected from `--preference`
-   | Keyword | Target year |
-   |---|---|
-   | `classic`, `old school`, `90s` | 1995 |
-   | `retro` | 1990 |
-   | `80s`, `vintage` | 1985–1988 |
-   | `2000s`, `early 2000s` | 2003–2005 |
-   | `new`, `recent`, `modern`, `latest` | current year |
-
-3. **Inferred from your watchlist** — median release year of your watched anime (automatic fallback)
-
----
-
-## 🖱️ Web GUI
-
-A full browser interface is available via **Gradio**:
-
-```bash
-python gui.py
-# → http://localhost:7860
-```
-
-**Features:**
-- Paste anime titles directly or upload a `.csv` / `.xlsx` watchlist file
-- Free-text aesthetic preference input with auto-detected genre display
-- **Plot/Synopsis preference** text box for dual-vector semantic search
-- Optional **preferred release year** number input
-- Slider for number of recommendations (3–20)
-- **Cover image gallery** output
-- Markdown results table with Visual Sim + Plot Sim scores
-- Quick-start example buttons
+This spawns an async `multiprocessing` pipeline that manages rate limits, resolves mapping IDs between MAL/AniList/Kitsu, and downloads cover art concurrently.
 
 ---
 
@@ -397,155 +128,27 @@ python gui.py
 
 ```
 Judging-Anime-By-Its-Cover/
-├── recommend.py              ← CLI entrypoint: parses args, prints results table & cover grid
-├── gui.py                    ← Gradio web GUI wrapping the same pipeline
-├── recommender.py            ← Core engine: dual-vector scoring, genre correlation, re-ranking
-├── input_parser.py           ← Fuzzy-matches user titles → MAL IDs via SQLite
-├── preference_encoder.py     ← Maps free-text preference → genre tags + CLIP text embedding
-│
-├── embed_covers.py           ← One-time: precompute CLIP embeddings for all cover images
-├── embed_synopsis.py         ← One-time: precompute SentenceTransformer synopsis embeddings
-├── mal_scraper.py            ← Unified async scraper (Kitsu base + AniList→Jikan→Kitsu tiered enrichment)
-│
-├── anime_data.db             ← SQLite: 30,071 anime with provider-independent schema
-├── cover_embeddings.npy      ← 768-d CLIP embeddings for all covers (88 MB)
-├── synopsis_embeddings.npy   ← 384-d SentenceTransformer embeddings for 19,490+ synopses (28 MB)
-├── embedding_index.json      ← Maps mal_id → row in cover_embeddings.npy (auto-generated)
-├── synopsis_index.json       ← Maps mal_id → row in synopsis_embeddings.npy (auto-generated)
-├── genre_correlation.json    ← Genre co-occurrence table (auto-generated on scrape)
-│
-├── covers/                   ← 30k+ local cover JPEGs named by mal_id (e.g. 1535.jpg)
-├── results/                  ← Saved recommendation grid images (recommendations.jpg)
-├── models/
-│   └── clip-vit-large-patch14/  ← Local CLIP model weights
-└── requirements.txt
-```
-
-### Key Database Schema (`anime_data.db`)
-
-The database uses a **provider-independent schema** so it is not tied to any single metadata API:
-
-| Column | Type | Description |
-|---|---|---|
-| `internal_id` | INTEGER PK | Auto-increment internal identifier |
-| `mal_id` | INTEGER UNIQUE | MyAnimeList ID (used for cover image naming) |
-| `anilist_id` | INTEGER | AniList ID (populated by tiered scraper) |
-| `title` | TEXT | Original/romaji title |
-| `title_english` | TEXT | English localized title |
-| `title_japanese` | TEXT | Japanese title |
-| `synopsis` | TEXT | Full plot summary |
-| `genres` | TEXT | Comma-separated genre/theme/demographic tags |
-| `episodes` | INTEGER | Episode count |
-| `score` | REAL | MAL community score |
-| `year` | INTEGER | Release year |
-| `season` | TEXT | Release season (WINTER/SPRING/SUMMER/FALL) |
-| `status` | TEXT | FINISHED / RELEASING / NOT_YET_RELEASED |
-| `studio` | TEXT | Primary animation studio |
-| `image_url` | TEXT | Remote cover image URL |
-| `local_image_path` | TEXT | Local cover path (e.g. `covers/1535.jpg`) |
-| `data_source` | TEXT | `anilist` / `jikan` / `kaggle_base` / `none` |
-
----
-
-## 🗄️ Data Pipeline
-
-The data pipeline is managed entirely by `mal_scraper.py`:
-
-```bash
-# Phase 1: Scrape base anime list from Kitsu API
-python mal_scraper.py --scrape-base
-
-# Phase 2: Enrich metadata via AniList → Jikan → Kitsu tiered fallback
-python mal_scraper.py --enrich-metadata
-
-# Phase 3: Download missing cover images (with Kitsu CDN fallback)
-python mal_scraper.py --download-covers
-
-# Run the entire pipeline from scratch
-python mal_scraper.py --all
-
-# Enrich metadata with a limit (for testing)
-python mal_scraper.py --enrich-metadata --limit 100
-```
-
-### Tiered Metadata Enrichment Strategy
-
-The `--enrich-metadata` phase implements a **tiered fallback pipeline** to maximize data coverage while handling upstream API instability:
-
-```
-For each anime with data_source = 'kaggle_base':
-  ├── 1. Try AniList GraphQL (idMal cross-reference)
-  │       └── If synopsis/genres found → save, mark data_source = 'anilist', done
-  ├── 2. Try Jikan REST API 
-  │       ├── 429 → exponential backoff, retry
-  │       ├── 5xx → return None immediately (upstream outage)
-  │       └── If synopsis found → save, mark data_source = 'jikan', done
-  ├── 3. Try Kitsu REST API (mapping cross-reference)
-  │       └── If synopsis found → save, mark data_source = 'kitsu', done
-  └── 4. Mark data_source = 'none' (permanent failure, skip on future runs)
-```
-
-**Current database coverage:**
-
-| data_source | Count | Description |
-|---|---|---|
-| `anilist` | ~19,479 | Full synopsis + rich metadata via AniList |
-| `kitsu` | ~2,949 | Obscure entries salvaged via Kitsu fallback |
-| `jikan` | ~13 | Legacy entries fetched via Jikan |
-| `kaggle_base` | ~666 | Pending enrichment |
-| `none` | ~7,013 | Extremely obscure entries with no metadata on any API |
-
-After any data updates, regenerate the embeddings:
-
-```bash
-# Regenerate cover embeddings after new images are downloaded
-python embed_covers.py
-
-# Regenerate synopsis embeddings after new synopses are added
-python embed_synopsis.py
+├── api.py                    ← FastAPI backend & playback controller
+├── web/                      ← React/Vite (Anikoto) frontend
+├── mal_scraper.py            ← Async metadata enricher
+├── recommender.py            ← ML similarity & ranking logic
+├── anime_data.db             ← 30k+ local anime database
+├── covers/                   ← Downloaded JPEG cover art
+└── ani-cli-master/           ← INCLUDED SUBMODULE: Native bash tool for anime streaming
 ```
 
 ---
 
-## 🛠️ Tech Stack
+## 🙏 Acknowledgments
 
-| Tool | Purpose |
-|---|---|
-| **[CLIP (ViT-Large/14)](https://github.com/openai/CLIP)** | Visual + text embedding backbone (768-d) |
-| **[all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)** | Semantic synopsis embedding (384-d, SentenceTransformers) |
-| **[AniList GraphQL API](https://anilist.gitbook.io/anilist-apiv2-docs/)** | Primary metadata source (synopsis, studio, season) |
-| **[Kitsu API](https://kitsu.docs.apiary.io/)** | Primary discovery engine & fallback metadata |
-| **[Jikan API](https://jikan.moe)** | Legacy fallback metadata source (unofficial MAL REST API) |
-| **[Gradio](https://gradio.app)** | Web GUI framework |
-| **NumPy** | Batched cosine similarity over 30k embeddings |
-| **[rapidfuzz](https://github.com/maxbachmann/RapidFuzz)** | Fuzzy title matching for input parsing |
-| **[rich](https://github.com/Textualize/rich)** | Terminal UI tables and progress bars |
-| **aiohttp** | Async HTTP for the scraper pipeline |
-| **SQLite** | Local anime metadata store |
-| **PyTorch** | CUDA-accelerated embedding inference |
-
----
-
-## 📊 Dataset
-
-| | Details |
-|---|---|
-| Anime in DB | 30,120 |
-| Anime with cover images | 30,120 JPEGs |
-| Anime with synopses | ~22,483 |
-| Anime with plot embeddings | 22,562 (384-d vectors) |
-| Cover embedding size | 88 MB (`cover_embeddings.npy`) |
-| Synopsis embedding size | 28 MB (`synopsis_embeddings.npy`) |
-| Database size | ~30 MB (`anime_data.db`) |
-| Raw cover images | 2.5 GB (`covers.zip`) |
-
-📁 **[Download from Google Drive](https://drive.google.com/drive/folders/1uK-QmsqDfnumBUYL23d8LFKXycOW-AWY?usp=sharing)**
-
-> Data sourced from [MyAnimeList](https://myanimelist.net) via the [Jikan API](https://jikan.moe) and [AniList](https://anilist.co) GraphQL API.  
-> This project is non-commercial and for educational/portfolio purposes only.
+This project relies heavily on the incredible work of the open-source community:
+- **[ani-cli](https://github.com/pystardust/ani-cli)** (`ani-cli-master/`): Included locally as the backbone for our zero-ad, native video streaming architecture. Massive thanks to the `ani-cli` maintainers for their fantastic scraping logic!
+- **OpenAI & HuggingFace**: For the CLIP and `all-MiniLM-L6-v2` embedding models.
+- **MyAnimeList, AniList, & Kitsu**: For their robust metadata APIs.
 
 ---
 
 ## 📄 License
+MIT License — see [LICENSE](LICENSE).
 
-MIT License — see [LICENSE](LICENSE)
+This project is for educational/portfolio purposes only. Anime metadata is provided by MyAnimeList, AniList, and Kitsu. Video streams are resolved locally via `ani-cli` logic.
