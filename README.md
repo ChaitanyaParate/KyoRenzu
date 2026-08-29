@@ -23,7 +23,12 @@ Our flagship AI engine can find anime that *looks like Death Note* but has *a re
 - **🎭 Genre Co-Occurrence Matrix**: A statistical correlation table built from 30,000 anime automatically soft-matches related genres (e.g., if you ask for Mecha, it knows to look for Sci-Fi).
 
 ### 4. 📚 Personal Library & Notifications
-- **Watchlist Tracking**: Add anime to your library, update your watch status (Watching, Completed, Plan to Watch), and score them.
+- **Watchlist Tracking**: Add anime to your library, update your watch status, and write personal reviews.
+- **Power User Features**: 
+  - **Quick +1**: Rapidly increment watched episodes directly from the library grid.
+  - **Advanced Sorting**: Sort by Global Score, Personal Score, Progress, or Recently Updated.
+  - **Layout Toggles**: Switch between the standard visual Grid View and a condensed List View for managing huge libraries.
+- **Visual Statistics Dashboard**: An interactive, glassmorphic analytics modal powered by `recharts`. View your total "Days Wasted", your Top Genres Pie Chart, and a Bar Chart of your scoring distribution!
 - **AniList Sync & Airing Notifications**: The backend runs an asynchronous background worker that polls the AniList GraphQL API for any anime you are currently "Watching". If a new episode airs, you get a native notification in the app's bell icon!
 
 ### 5. 🕷️ Tiered Data Scraping Pipeline

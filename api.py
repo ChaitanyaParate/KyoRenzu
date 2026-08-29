@@ -18,6 +18,8 @@ import cloudscraper
 import re
 import asyncio
 import subprocess
+from bs4 import BeautifulSoup
+import urllib.parse
 
 from input_parser import auto_parse, get_all_raw_titles, _resolve_by_ids, _load_title_map, AnimeEntry
 from preference_encoder import EncodedPreference
@@ -331,6 +333,42 @@ def get_library_sqlite():
 _LIBRARY_CACHE = None
 _LIBRARY_CACHE_TIME = 0
 
+def upsert_anime_to_db(item: dict, cover_url: str, synopsis: str):
+    """Dynamically inserts missing anime from AniList into the local SQLite database."""
+    mal_id = item.get('idMal')
+    if not mal_id: return
+    
+    title = item.get('title', {}).get('english') or item.get('title', {}).get('romaji')
+    title_english = item.get('title', {}).get('english') or ""
+    score = (item.get('averageScore') or 0) / 10.0
+    episodes = item.get('episodes')
+    members = item.get('popularity')
+    year = item.get('seasonYear')
+    genres = ", ".join(item.get('genres', []))
+    status = item.get('status')
+    
+    try:
+        conn = sqlite3.connect('anime_data.db')
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO anime (
+                mal_id, title, title_english, score, episodes, 
+                members, synopsis, year, genres, image_url, status, data_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(mal_id) DO UPDATE SET
+                title_english = CASE WHEN (anime.title_english IS NULL OR anime.title_english = '') THEN excluded.title_english ELSE anime.title_english END,
+                synopsis = CASE WHEN (anime.synopsis IS NULL OR anime.synopsis = '') THEN excluded.synopsis ELSE anime.synopsis END,
+                image_url = CASE WHEN (anime.image_url IS NULL OR anime.image_url = '') THEN excluded.image_url ELSE anime.image_url END,
+                genres = CASE WHEN (anime.genres IS NULL OR anime.genres = '') THEN excluded.genres ELSE anime.genres END
+        """, (
+            mal_id, title, title_english, score, episodes,
+            members, synopsis, year, genres, cover_url, status, 'anilist_dynamic'
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Failed to dynamic upsert {title}: {e}")
+
 def get_local_data_for_mal_id(mal_id: int):
     conn = sqlite3.connect('anime_data.db')
     c = conn.cursor()
@@ -412,6 +450,9 @@ async def get_library():
                         "banner_url": item.get('bannerImage'),
                         "theme_url": theme_url
                     })
+                    
+                    upsert_anime_to_db(item, cover_url, synopsis)
+                        
                     valid_heroes.append(item)
                 
                 # 2. Fetch Categories via AniList
@@ -465,6 +506,8 @@ async def get_library():
                             "banner_url": item.get('bannerImage'),
                             "theme_url": theme_url
                         })
+                        
+                        upsert_anime_to_db(item, cover_url, synopsis)
                     
                     if anime_list:
                         library_data.append({
@@ -513,6 +556,7 @@ class UserLibraryUpdate(BaseModel):
     episodes_watched: Optional[int] = None
     score: Optional[float] = None
     worth_level: Optional[str] = None
+    notes: Optional[str] = None
 
 @app.delete("/api/user_library/{mal_id}")
 async def delete_user_library_item(mal_id: int):
@@ -566,9 +610,9 @@ async def get_user_library():
             cursor.execute("ATTACH DATABASE 'anime_data.db' AS anime_db")
             cursor.execute("""
                 SELECT 
-                    u.mal_id, u.status, u.episodes_watched, u.score, u.worth_level, u.updated_at,
+                    u.mal_id, u.status, u.episodes_watched, u.score, u.worth_level, u.updated_at, u.notes,
                     a.title, a.title_english, a.genres, a.episodes as total_episodes,
-                    a.season, a.year, a.image_url, a.local_image_path, a.synopsis
+                    a.season, a.year, a.image_url, a.local_image_path, a.synopsis, a.score as global_score
                 FROM user_library u
                 JOIN anime_db.anime a ON u.mal_id = a.mal_id
                 ORDER BY u.updated_at DESC
@@ -594,7 +638,7 @@ async def update_user_library(update: UserLibraryUpdate):
             cursor = conn.cursor()
             
             # Check if exists
-            cursor.execute("SELECT status, episodes_watched, score, worth_level FROM user_library WHERE mal_id = ?", (update.mal_id,))
+            cursor.execute("SELECT status, episodes_watched, score, worth_level, notes FROM user_library WHERE mal_id = ?", (update.mal_id,))
             row = cursor.fetchone()
             
             if row:
@@ -602,22 +646,24 @@ async def update_user_library(update: UserLibraryUpdate):
                 new_episodes = update.episodes_watched if update.episodes_watched is not None else row[1]
                 new_score = update.score if update.score is not None else row[2]
                 new_worth = update.worth_level if update.worth_level is not None else row[3]
+                new_notes = update.notes if update.notes is not None else row[4]
                 
                 cursor.execute("""
                     UPDATE user_library 
-                    SET status = ?, episodes_watched = ?, score = ?, worth_level = ?, updated_at = CURRENT_TIMESTAMP
+                    SET status = ?, episodes_watched = ?, score = ?, worth_level = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE mal_id = ?
-                """, (new_status, new_episodes, new_score, new_worth, update.mal_id))
+                """, (new_status, new_episodes, new_score, new_worth, new_notes, update.mal_id))
             else:
                 new_status = update.status if update.status is not None else 'Watching'
                 new_episodes = update.episodes_watched if update.episodes_watched is not None else 0
                 new_score = update.score if update.score is not None else 0
                 new_worth = update.worth_level if update.worth_level is not None else ''
+                new_notes = update.notes if update.notes is not None else ''
                 
                 cursor.execute("""
-                    INSERT INTO user_library (mal_id, status, episodes_watched, score, worth_level)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (update.mal_id, new_status, new_episodes, new_score, new_worth))
+                    INSERT INTO user_library (mal_id, status, episodes_watched, score, worth_level, notes)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (update.mal_id, new_status, new_episodes, new_score, new_worth, new_notes))
             
             conn.commit()
             return {"status": "success"}
@@ -748,7 +794,7 @@ async def import_user_library(file: UploadFile = File(...), overwrite: bool = Fo
                         pass
                         
                     if mal_id <= 0:
-                        title = row.get('Anime', '') or row.get('title', '')
+                        title = row.get('Anime', '') or row.get('title', '') or row.get('Anime Movie', '')
                         if not title: continue
                         adb_cursor.execute("SELECT mal_id FROM anime WHERE title_english LIKE ? OR title LIKE ? COLLATE NOCASE", (f"%{title}%", f"%{title}%"))
                         res = adb_cursor.fetchone()
@@ -916,8 +962,12 @@ async def search_anime(
                     placeholders = ",".join("?" for _ in matched_ids)
                     query += f" AND mal_id IN ({placeholders})"
                     params.extend(matched_ids)
+                    
+                    case_stmts = " ".join([f"WHEN {mid} THEN {i}" for i, mid in enumerate(matched_ids)])
+                    fuzzy_order = f"CASE mal_id {case_stmts} ELSE 9999 END"
                 else:
                     query += " AND 1=0" # No matches found
+                    fuzzy_order = None
                 
             if genres:
                 for genre in genres.split(","):
@@ -942,7 +992,9 @@ async def search_anime(
                 elif format.upper() == 'MOVIE' or format.upper() == 'OVA':
                     query += " AND episodes = 1"
                     
-            if sort == "popularity":
+            if q and fuzzy_order:
+                query += f" ORDER BY {fuzzy_order} ASC"
+            elif sort == "popularity":
                 query += " ORDER BY members DESC"
             elif sort == "score":
                 query += " ORDER BY score DESC"
@@ -995,7 +1047,14 @@ async def get_recommendations(mal_id: int):
             
         # Fetch recommendations using the ML recommender engine
         # top_n=6 because the first result might be the anime itself (if not perfectly filtered)
-        recs = core_recommend(liked_anime=liked, top_n=6)
+        try:
+            recs = core_recommend(liked_anime=liked, top_n=6)
+        except ValueError as ve:
+            print(f"[api] Recommendation fallback: {ve}")
+            recs = []
+        except Exception as e:
+            print(f"[api] Recommendation error: {e}")
+            recs = []
         
         # Format results
         results = []
@@ -1190,6 +1249,28 @@ async def mark_notifications_read(req: ReadNotificationRequest):
             return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/episodes_web_search")
+async def get_episodes_web_search(title: str):
+    try:
+        query = urllib.parse.quote_plus(f"{title} total episodes")
+        url = f"https://html.duckduckgo.com/html/?q={query}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        snippets = [a.text for a in soup.find_all("a", class_="result__snippet")]
+        
+        for s in snippets:
+            match = re.search(r'(\d+)\s+Episodes?', s, re.IGNORECASE)
+            if match:
+                episodes = int(match.group(1))
+                if 0 < episodes < 1500 and episodes != 2026:
+                    return {"status": "success", "episodes": episodes}
+                    
+        return {"status": "error", "message": "Could not find episode count in web search"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)

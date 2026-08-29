@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import { Sparkles, Music, BookOpen, Star, Search, Image as ImageIcon, Home, Library, Bell, Menu, Play, Info, X, Type, Hash, CalendarRange, Tv, MonitorPlay, ArrowDownWideNarrow, Filter, FilterX, Building2, Globe, Download, Upload, Shuffle, Users, User, Compass, AlertCircle } from 'lucide-react'
+import { Sparkles, Music, BookOpen, Star, Search, Image as ImageIcon, Home, Library, Bell, Menu, Play, Info, X, Type, Hash, CalendarRange, Tv, MonitorPlay, ArrowDownWideNarrow, Filter, FilterX, Building2, Globe, Download, Upload, Shuffle, Users, User, Compass, AlertCircle, LayoutGrid, List, BarChart2 } from 'lucide-react'
+import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import './index.css'
 
 interface AnimeRecommendation {
@@ -50,6 +51,7 @@ function App() {
   
   // Details Modal State
   const [selectedAnime, setSelectedAnime] = useState<any | null>(null)
+  const [dynamicEpisodes, setDynamicEpisodes] = useState<number | null>(null)
   const [modalRecommendations, setModalRecommendations] = useState<any[]>([])
   
   // Video Player State
@@ -66,6 +68,8 @@ function App() {
   const [userLibraryStatusFilter, setUserLibraryStatusFilter] = useState('All')
   const [librarySearch, setLibrarySearch] = useState('')
   const [libraryGenre, setLibraryGenre] = useState('')
+  const [librarySort, setLibrarySort] = useState('updated_desc')
+  const [libraryViewMode, setLibraryViewMode] = useState<'list'|'grid'>('list')
   const [librarySeason, setLibrarySeason] = useState('')
   const [libraryYear, setLibraryYear] = useState('')
   const [libraryScore, setLibraryScore] = useState('')
@@ -75,24 +79,32 @@ function App() {
   const [showImportModal, setShowImportModal] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const [showUniqueModal, setShowUniqueModal] = useState(false)
+  const [showStatsModal, setShowStatsModal] = useState(false)
   const [uniqueCount, setUniqueCount] = useState(0)
+  const [moviesCount, setMoviesCount] = useState(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const calculateUniqueAnime = () => {
     const bases = new Set();
+    let movies = 0;
     userLibrary.filter(item => item.status === 'Completed').forEach(item => {
-      let title = item.title.toLowerCase();
-      title = title.replace(/season \d+/g, '')
-                   .replace(/part \d+/g, '')
-                   .replace(/\d+nd season/g, '')
-                   .replace(/\d+rd season/g, '')
-                   .replace(/\d+th season/g, '')
-                   .replace(/the final season/g, '')
-                   .split(':')[0] 
-                   .trim();
-      bases.add(title);
+      if (item.total_episodes === 1) {
+        movies++;
+      } else {
+        let title = item.title.toLowerCase();
+        title = title.replace(/season \d+/g, '')
+                     .replace(/part \d+/g, '')
+                     .replace(/\d+nd season/g, '')
+                     .replace(/\d+rd season/g, '')
+                     .replace(/\d+th season/g, '')
+                     .replace(/the final season/g, '')
+                     .split(':')[0] 
+                     .trim();
+        bases.add(title);
+      }
     });
     setUniqueCount(bases.size);
+    setMoviesCount(movies);
     setShowUniqueModal(true);
   }
 
@@ -284,6 +296,57 @@ function App() {
   useEffect(() => {
     console.log("Triggered modal useEffect with anime:", selectedAnime);
     if (selectedAnime?.mal_id) {
+      setDynamicEpisodes(selectedAnime.episodes || null);
+      if (!selectedAnime.episodes) {
+        fetch(`https://graphql.anilist.co`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: `query($id: Int) { Media(idMal: $id) { episodes nextAiringEpisode { episode } } }`,
+            variables: { id: selectedAnime.mal_id }
+          })
+        }).then(res => res.json()).then(data => {
+          const media = data?.data?.Media;
+          if (media && (media.episodes || media.nextAiringEpisode)) {
+            const eps = media.nextAiringEpisode ? media.nextAiringEpisode.episode - 1 : media.episodes;
+            setDynamicEpisodes(eps);
+          } else {
+            fetch(`https://api.jikan.moe/v4/anime/${selectedAnime.mal_id}`)
+              .then(res => res.json())
+              .then(jikanData => {
+                if (jikanData?.data?.episodes) {
+                  setDynamicEpisodes(jikanData.data.episodes);
+                } else {
+                  // Final fallback: Web Search
+                  fetch(`http://localhost:8000/api/episodes_web_search?title=${encodeURIComponent(selectedAnime.title)}`)
+                    .then(res => res.json())
+                    .then(searchData => {
+                      if (searchData.status === 'success' && searchData.episodes) {
+                        setDynamicEpisodes(searchData.episodes);
+                      } else {
+                        setDynamicEpisodes(12);
+                      }
+                    }).catch(() => setDynamicEpisodes(12));
+                }
+              }).catch(() => {
+                // Final fallback: Web Search if Jikan totally fails
+                fetch(`http://localhost:8000/api/episodes_web_search?title=${encodeURIComponent(selectedAnime.title)}`)
+                  .then(res => res.json())
+                  .then(searchData => {
+                    if (searchData.status === 'success' && searchData.episodes) {
+                      setDynamicEpisodes(searchData.episodes);
+                    } else {
+                      setDynamicEpisodes(12);
+                    }
+                  }).catch(() => setDynamicEpisodes(12));
+              });
+          }
+        }).catch(err => {
+          console.error("Dynamic episodes fetch failed:", err);
+          setDynamicEpisodes(12);
+        });
+      }
+
       console.log("Fetching recommendations for mal_id:", selectedAnime.mal_id);
       setModalRecommendations([]) // clear previous
       fetch(`http://localhost:8000/api/recommendations/${selectedAnime.mal_id}`)
@@ -456,6 +519,104 @@ function App() {
     const int = setInterval(fetchNotifications, 60000)
     return () => clearInterval(int)
   }, [])
+
+  const renderStatsModal = () => {
+    if (!showStatsModal) return null;
+
+    let totalMinutes = 0;
+    let totalEpisodes = 0;
+    userLibrary.forEach(item => {
+      totalEpisodes += (item.episodes_watched || 0);
+      if (item.total_episodes === 1) {
+        totalMinutes += (item.episodes_watched || 0) * 90;
+      } else {
+        totalMinutes += (item.episodes_watched || 0) * 22;
+      }
+    });
+    const daysWasted = totalMinutes / (60 * 24);
+
+    const genreCounts: Record<string, number> = {};
+    userLibrary.forEach(item => {
+      if (item.genres) {
+        const genresList = item.genres.split(',').map((g: string) => g.trim());
+        genresList.forEach((g: string) => {
+          genreCounts[g] = (genreCounts[g] || 0) + 1;
+        });
+      }
+    });
+    const genreData = Object.entries(genreCounts)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 8);
+
+    const COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#d946ef'];
+
+    const scoreCounts: Record<number, number> = { 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:0, 8:0, 9:0, 10:0 };
+    userLibrary.forEach(item => {
+      if (item.score && item.score >= 1 && item.score <= 10) {
+        scoreCounts[Math.round(item.score)]++;
+      }
+    });
+    const scoreData = Object.entries(scoreCounts).map(([score, count]) => ({ score: `★ ${score}`, count }));
+
+    return (
+      <div className="modal-overlay" onClick={() => setShowStatsModal(false)}>
+        <div className="stats-modal" onClick={e => e.stopPropagation()}>
+          <div className="stats-modal-header">
+            <h2>Your Anime Statistics</h2>
+            <button className="stats-close-btn" onClick={() => setShowStatsModal(false)}><X size={20} /></button>
+          </div>
+          
+          <div className="stats-metrics-grid">
+            <div className="stats-metric-card">
+              <span className="stats-metric-label">Total Anime</span>
+              <span className="stats-metric-value">{userLibrary.length}</span>
+            </div>
+            <div className="stats-metric-card">
+              <span className="stats-metric-label">Total Episodes</span>
+              <span className="stats-metric-value">{totalEpisodes}</span>
+            </div>
+            <div className="stats-metric-card highlight">
+              <span className="stats-metric-label">Days Wasted</span>
+              <span className="stats-metric-value">{daysWasted.toFixed(1)}</span>
+            </div>
+          </div>
+
+          <div className="stats-charts-container">
+            <div className="stats-chart-card">
+              <h3>Top Genres</h3>
+              <div className="chart-wrapper">
+                <ResponsiveContainer width="100%" height={250}>
+                  <PieChart>
+                    <Pie data={genreData} cx="50%" cy="50%" innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value">
+                      {genreData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border-color)', borderRadius: '8px', color: 'white' }} />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="stats-chart-card">
+              <h3>Score Distribution</h3>
+              <div className="chart-wrapper">
+                <ResponsiveContainer width="100%" height={250}>
+                  <BarChart data={scoreData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                    <XAxis dataKey="score" stroke="var(--text-secondary)" fontSize={12} tickLine={false} axisLine={false} />
+                    <YAxis stroke="var(--text-secondary)" fontSize={12} tickLine={false} axisLine={false} allowDecimals={false} />
+                    <Tooltip cursor={{ fill: 'rgba(255,255,255,0.05)' }} contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border-color)', borderRadius: '8px', color: 'white' }} />
+                    <Bar dataKey="count" fill="var(--accent-primary)" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="app-container">
@@ -903,6 +1064,9 @@ function App() {
               </div>
               
               <div className="profile-actions" style={{ marginLeft: 'auto', display: 'flex', gap: '12px', alignItems: 'center' }}>
+                <button className="btn-secondary" onClick={() => setShowStatsModal(true)} style={{ background: 'var(--accent-primary)', borderColor: 'var(--accent-primary)', color: 'white' }}>
+                  <BarChart2 size={16} style={{marginRight:'6px'}} /> View Stats
+                </button>
                 <button className="btn-secondary" onClick={() => window.location.href = 'http://localhost:8000/api/library/export?format=csv'}>
                   <Download size={16} style={{marginRight:'6px'}} /> Export CSV
                 </button>
@@ -1036,6 +1200,16 @@ function App() {
                   onChange={e => setLibraryScore(e.target.value)}
                 />
               </div>
+              
+              <select className="filter-select" value={librarySort} onChange={e => setLibrarySort(e.target.value)}>
+                <option value="updated_desc">Recently Updated</option>
+                <option value="user_score_desc">My Score (High - Low)</option>
+                <option value="global_score_desc">Global Score (High - Low)</option>
+                <option value="progress_desc">Episodes Watched</option>
+                <option value="title_asc">Title (A-Z)</option>
+                <option value="title_desc">Title (Z-A)</option>
+              </select>
+
               <button className="filter-btn" onClick={() => {
                 setLibrarySearch('');
                 setLibraryGenre('');
@@ -1043,15 +1217,20 @@ function App() {
                 setLibraryYear('');
                 setLibraryScore('');
                 setLibraryScoreCondition('>=');
-
+                setLibrarySort('updated_desc');
               }}>Clear Filters</button>
+
+              <div className="view-toggle">
+                <button className={`view-toggle-btn ${libraryViewMode === 'grid' ? 'active' : ''}`} onClick={() => setLibraryViewMode('grid')} title="Grid View"><LayoutGrid size={16} /></button>
+                <button className={`view-toggle-btn ${libraryViewMode === 'list' ? 'active' : ''}`} onClick={() => setLibraryViewMode('list')} title="List View"><List size={16} /></button>
+              </div>
             </div>
 
-            {/* List View */}
+            {/* View Mode Rendering */}
             {userLibraryLoading ? (
                <div className="loader-container"><div className="spinner"></div></div>
             ) : (
-              <div className="library-list">
+              <div className={libraryViewMode === 'list' ? 'library-list' : 'anime-grid'} style={libraryViewMode === 'grid' ? { padding: '16px' } : {}}>
                 {userLibrary
                   .filter(item => userLibraryStatusFilter === 'All' || item.status === userLibraryStatusFilter)
                   .filter(item => !librarySearch || 
@@ -1070,26 +1249,111 @@ function App() {
                     if (libraryScoreCondition === '=') return item.score === val;
                     return true;
                   })
-                  .map((item, idx) => (
-                  <div key={idx} className="library-list-item" onClick={() => setSelectedAnime(item)}>
-                    <img src={item.cover_url} alt={item.title} className="library-item-cover" />
-                    <div className="library-item-details">
-                      <h3 className="library-item-title">{item.title}</h3>
-                      <div className="library-item-meta">
-                        <span className={`status-dot ${item.status.toLowerCase().replace(' ', '-')}`}></span>
-                        <span>{item.status}</span>
-                        <span className="meta-divider">•</span>
-                        <span>{item.episodes_watched} / {item.total_episodes || '?'} EPS</span>
-                        {item.score > 0 && (
-                          <>
-                            <span className="meta-divider">•</span>
-                            <span style={{ color: 'var(--accent-primary)', fontWeight: 'bold' }}>★ {item.score}</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ))}
+                  .sort((a, b) => {
+                    if (librarySort === 'updated_desc') return (b.updated_at || 0) - (a.updated_at || 0);
+                    if (librarySort === 'user_score_desc') return (b.score || 0) - (a.score || 0);
+                    if (librarySort === 'global_score_desc') return (b.global_score || 0) - (a.global_score || 0);
+                    if (librarySort === 'progress_desc') return (b.episodes_watched || 0) - (a.episodes_watched || 0);
+                    
+                    const titleA = a.title_english || a.title || "";
+                    const titleB = b.title_english || b.title || "";
+                    
+                    if (librarySort === 'title_asc') return titleA.localeCompare(titleB);
+                    if (librarySort === 'title_desc') return titleB.localeCompare(titleA);
+                    
+                    return 0;
+                  })
+                  .map((item, idx) => {
+                    if (libraryViewMode === 'list') {
+                      return (
+                        <div key={idx} className="library-list-item" onClick={() => setSelectedAnime(item)}>
+                          <div style={{ position: 'relative' }}>
+                            <img src={item.cover_url} alt={item.title} className="library-item-cover" />
+                            {item.status === 'Watching' && (
+                              <button 
+                                className="quick-add-btn" 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  updateLibraryItem(item.mal_id, { episodes_watched: (item.episodes_watched || 0) + 1 });
+                                }}
+                                title="Watched another episode"
+                              >
+                                +1
+                              </button>
+                            )}
+                          </div>
+                          <div className="library-item-details">
+                            <h3 className="library-item-title">{item.title}</h3>
+                            <div className="library-item-meta">
+                              <span className={`status-dot ${item.status.toLowerCase().replace(' ', '-')}`}></span>
+                              <span>{item.status}</span>
+                              <span className="meta-divider">•</span>
+                              <span>{item.episodes_watched} / {item.total_episodes || '?'} EPS</span>
+                              {item.score > 0 && (
+                                <>
+                                  <span className="meta-divider">•</span>
+                                  <span style={{ color: 'var(--accent-primary)', fontWeight: 'bold' }} title="My Score">My ★ {item.score}</span>
+                                </>
+                              )}
+                              {item.global_score > 0 && (
+                                <>
+                                  <span className="meta-divider">•</span>
+                                  <span style={{ color: 'var(--text-secondary)' }} title="MAL Global Score">MAL ★ {item.global_score.toFixed(2)}</span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    } else {
+                      // Grid View rendering
+                      return (
+                        <div key={idx} className="anikoto-card" onClick={() => setSelectedAnime(item)}>
+                          <div className="poster-container">
+                            {item.cover_url ? (
+                              <img src={item.cover_url} alt={item.title} loading="lazy" />
+                            ) : (
+                              <div className="anime-card-placeholder">
+                                <ImageIcon size={32} />
+                              </div>
+                            )}
+                            <div className="ep-status-overlay">
+                              <span className="ep-sub" style={{ background: 'rgba(0,0,0,0.7)', padding: '2px 6px', borderRadius: '4px' }}>
+                                <Type size={10} style={{marginRight: '2px'}}/>{item.episodes_watched} / {item.total_episodes || '?'}
+                              </span>
+                            </div>
+                            {item.status === 'Watching' && (
+                              <button 
+                                className="quick-add-btn" 
+                                style={{ zIndex: 10, width: '32px', height: '32px', fontSize: '1rem', borderRadius: '8px 0 0 0' }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  updateLibraryItem(item.mal_id, { episodes_watched: (item.episodes_watched || 0) + 1 });
+                                }}
+                                title="Watched another episode"
+                              >
+                                +1
+                              </button>
+                            )}
+                            <div className="poster-hover-details">
+                              <h4 className="hover-title">{item.title}</h4>
+                              <div className="hover-meta">
+                                <span>{item.status}</span>
+                                <span>•</span>
+                                <span>★ {item.score > 0 ? item.score : (item.global_score ? item.global_score.toFixed(1) : '?')}</span>
+                              </div>
+                              <div className="hover-play-btn">
+                                <Play size={24} fill="white" color="white" />
+                              </div>
+                            </div>
+                          </div>
+                          <div className="card-info">
+                            <h3 className="card-title">{item.title}</h3>
+                          </div>
+                        </div>
+                      );
+                    }
+                  })}
                 {userLibrary.length === 0 && (
                   <div style={{textAlign: 'center', padding: '40px', color: '#8a8d98'}}>
                     Your watch list is empty. Add anime from the Discover tab!
@@ -1356,7 +1620,7 @@ function App() {
                       <span className="stat-item"><Star size={16} className="text-accent" /> Rating: {Math.round(selectedAnime.score * 10)}%</span>
                     )}
                     <span className="stat-item"><Tv size={16} /> Format: {selectedAnime.type || ((selectedAnime.episodes || selectedAnime.total_episodes) === 1 ? 'Movie' : 'TV Series')}</span>
-                    <span className="stat-item"><Play size={16} /> Episodes: {selectedAnime.episodes || selectedAnime.total_episodes || '?'}</span>
+                    <span className="stat-item"><Play size={16} /> Episodes: {dynamicEpisodes || selectedAnime.episodes || selectedAnime.total_episodes || '?'}</span>
                     {selectedAnime.members && (
                       <span className="stat-item">Reviews: {selectedAnime.members?.toLocaleString() || "N/A"}</span>
                     )}
@@ -1439,6 +1703,21 @@ function App() {
                               }}
                               onMouseUp={(e) => updateLibraryItem(libItem.mal_id, { score: parseInt(e.currentTarget.value) || 0 })}
                               onTouchEnd={(e) => updateLibraryItem(libItem.mal_id, { score: parseInt(e.currentTarget.value) || 0 })}
+                            />
+                          </div>
+                          
+                          <div style={{ flex: '1 1 100%', minWidth: '100%', marginTop: '8px' }}>
+                            <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Personal Notes / Review</label>
+                            <textarea 
+                              className="input-field" 
+                              style={{ width: '100%', minHeight: '60px', padding: '8px 12px', resize: 'vertical' }}
+                              placeholder="Write your review or notes here..."
+                              value={libItem.notes || ''}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setUserLibrary(prev => prev.map(i => i.mal_id === libItem.mal_id ? { ...i, notes: val } : i));
+                              }}
+                              onBlur={(e) => updateLibraryItem(libItem.mal_id, { notes: e.target.value })}
                             />
                           </div>
                         </div>
@@ -1542,9 +1821,9 @@ function App() {
                         value={episodePage}
                         onChange={(e) => setEpisodePage(Number(e.target.value))}
                       >
-                        {Array.from({ length: Math.ceil((selectedAnime.episodes || 1200) / 100) }).map((_, i) => (
+                        {Array.from({ length: Math.ceil((dynamicEpisodes || selectedAnime.episodes || 12) / 100) }).map((_, i) => (
                           <option key={i} value={i}>
-                            {i * 100 + 1}-{Math.min((i + 1) * 100, selectedAnime.episodes || 1200)}
+                            {i * 100 + 1}-{Math.min((i + 1) * 100, dynamicEpisodes || selectedAnime.episodes || 12)}
                           </option>
                         ))}
                       </select>
@@ -1581,7 +1860,7 @@ function App() {
                           1 (Movie)
                         </button>
                       ) : (
-                        Array.from({ length: Math.min(100, (selectedAnime.episodes || 1200) - episodePage * 100) }).map((_, i) => {
+                        Array.from({ length: Math.min(100, (dynamicEpisodes || selectedAnime.episodes || 12) - episodePage * 100) }).map((_, i) => {
                           const epNum = episodePage * 100 + i + 1;
                           return (
                             <button key={epNum} className="episode-grid-btn" onClick={() => playEpisode(selectedAnime.title, selectedAnime.title_original, epNum)}>
@@ -1615,13 +1894,16 @@ function App() {
       {/* Unique Anime Pop Up */}
       {showUniqueModal && (
         <div className="modal-overlay" onClick={() => setShowUniqueModal(false)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '400px', textAlign: 'center', padding: '32px' }}>
+          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '400px', textAlign: 'center', padding: '32px', aspectRatio: 'auto', overflow: 'visible' }}>
             <div style={{ marginBottom: '16px', color: 'var(--accent-primary)', display: 'flex', justifyContent: 'center' }}>
               <MonitorPlay size={48} />
             </div>
-            <h2 style={{ marginBottom: '12px', fontSize: '1.5rem', color: 'white' }}>Unique Franchises</h2>
+            <h2 style={{ marginBottom: '12px', fontSize: '1.5rem', color: 'white' }}>Unique Watch Stats</h2>
+            <p style={{ color: 'var(--text-secondary)', marginBottom: '12px', lineHeight: '1.5' }}>
+              You have completed exactly <strong style={{ color: 'white', fontSize: '1.2rem' }}>{uniqueCount}</strong> unique TV series, carefully excluding all sequels and spin-offs!
+            </p>
             <p style={{ color: 'var(--text-secondary)', marginBottom: '24px', lineHeight: '1.5' }}>
-              You have completed exactly <strong style={{ color: 'white', fontSize: '1.2rem' }}>{uniqueCount}</strong> unique anime series, carefully excluding all sequels, movies, and spin-offs!
+              You have also watched <strong style={{ color: 'white', fontSize: '1.2rem' }}>{moviesCount}</strong> total movies.
             </p>
             <button className="btn-primary" onClick={() => setShowUniqueModal(false)} style={{ width: '100%', justifyContent: 'center' }}>
               Awesome!
@@ -1703,6 +1985,8 @@ function App() {
           {toastMessage}
         </div>
       )}
+
+      {renderStatsModal()}
 
     </div>
   )
