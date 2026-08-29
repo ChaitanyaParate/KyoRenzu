@@ -258,6 +258,7 @@ function App() {
   const [preference, setPreference] = useState('')
   const [plotPreference, setPlotPreference] = useState('')
   const [audioPreference, setAudioPreference] = useState('')
+  const [numRecommendations, setNumRecommendations] = useState(12)
   const [topN] = useState(12)
   const [discoverLoading, setDiscoverLoading] = useState(false)
   const [results, setResults] = useState<AnimeRecommendation[]>([])
@@ -383,7 +384,7 @@ function App() {
           preference: preference,
           plot_preference: plotPreference,
           audio_preference: audioPreference,
-          top_n: topN,
+          top_n: numRecommendations,
           use_library: useLibraryAsRef
         })
       })
@@ -620,6 +621,9 @@ function App() {
 
   return (
     <div className="app-container">
+      <div className="sr-only">
+        KyōRenzu, translated as Resonance Lens, acts as a lens to find the anime that perfectly resonates with your visual, auditory, and narrative preferences.
+      </div>
       {/* Top Navigation Header */}
       <header className="top-header">
         <div className="header-container">
@@ -628,7 +632,7 @@ function App() {
               <Menu size={24} />
             </div>
             <div className="brand" onClick={() => setActiveTab('home')}>
-              <span style={{ color: 'white' }}>Ani</span><span style={{ color: 'var(--accent-primary)' }}>koto</span>
+              <span style={{ color: 'white' }}>Kyō</span><span style={{ color: 'var(--accent-primary)' }}>Renzu</span>
             </div>
             <nav className="header-nav">
               <span className={`nav-link ${activeTab === 'home' ? 'active' : ''}`} onClick={() => setActiveTab('home')}>Home</span>
@@ -779,114 +783,121 @@ function App() {
                   </div>
                 )}
                 
-                {/* Anikoto Dual Column Layout */}
-                <div className="anikoto-home-layout">
-                  {/* Left Main Content */}
-                  <div className="anikoto-main-col">
-                    <div className="anikoto-sections">
-                      {/* Recently Updated & Upcoming Anime Grids */}
-                      {categories.filter(cat => ['Recently Updated', 'Upcoming Anime'].includes(cat.category)).map((cat, idx) => (
-                        <section key={idx} className="category-section">
-                          <div className="section-head">
-                            <h2 className="section-title">{cat.category}</h2>
-                            <span className="view-more" onClick={() => setActiveTab('search')} style={{cursor: 'pointer'}}>View more <ArrowDownWideNarrow size={14} /></span>
-                          </div>
-                          <div className="anime-grid">
-                            {cat.anime.map((anime: any, aIdx: number) => (
-                              <div key={aIdx} className="anikoto-card" onClick={() => setSelectedAnime(anime)}>
-                                <div className="poster-container">
-                                  {anime.cover_url ? (
-                                    <img src={anime.cover_url} alt={anime.title} loading="lazy" />
-                                  ) : (
-                                    <div className="anime-card-placeholder">
-                                      <ImageIcon size={32} />
-                                    </div>
-                                  )}
-                                  <div className="ep-status-overlay">
-                                    <span className="ep-sub"><Type size={10} style={{marginRight: '2px'}}/>{anime.episodes || '?'}</span>
-                                    <span className="ep-dub"><Tv size={10} style={{marginRight: '2px'}}/>HD</span>
-                                  </div>
-                                  <div className="poster-hover-details">
-                                    <h4 className="hover-title">{anime.title}</h4>
-                                    <div className="hover-meta">
-                                      <span>{anime.year || '?'}</span>
-                                      <span>•</span>
-                                      <span>{anime.episodes ? `${anime.episodes} EPS` : '? EPS'}</span>
-                                    </div>
-                                    <div className="hover-play-btn">
-                                      <Play size={24} fill="white" color="white" />
-                                    </div>
-                                  </div>
-                                </div>
-                                <div className="card-info">
-                                  <h3 className="card-title" title={anime.title}>{anime.title}</h3>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </section>
-                      ))}
-
-                      {/* Top Tables */}
-                      <div className="top-tables-container">
-                        {categories.filter(cat => ['New Release', 'Just Completed'].includes(cat.category)).map((cat, idx) => (
-                          <section key={idx} className="top-table-section" style={{ flex: 1, minWidth: '300px' }}>
-                            <div className="section-head">
-                              <h2 className="section-title">{cat.category}</h2>
-                              <span className="view-more" onClick={() => setActiveTab('search')} style={{cursor: 'pointer'}}>View more <ArrowDownWideNarrow size={14} /></span>
-                            </div>
-                            <div className="top-table-list">
-                              {cat.anime.slice(0, 5).map((anime: any, aIdx: number) => (
-                                <div key={aIdx} className="top-table-item" onClick={() => setSelectedAnime(anime)} style={{ display: 'flex', gap: '12px', marginBottom: '16px', cursor: 'pointer', background: 'rgba(255,255,255,0.02)', padding: '8px', borderRadius: '8px', transition: '0.2s' }} onMouseOver={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.08)'} onMouseOut={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.02)'}>
-                                  <div style={{ width: '60px', height: '80px', flexShrink: 0, borderRadius: '4px', overflow: 'hidden' }}>
-                                    <img src={anime.cover_url || ''} alt={anime.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                                  </div>
-                                  <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-                                    <h3 style={{ fontSize: '1rem', fontWeight: '500', marginBottom: '8px', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{anime.title}</h3>
-                                    <div style={{ display: 'flex', gap: '8px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                                      <span className="ep-pill" style={{ background: 'var(--accent-primary)', color: 'black', padding: '2px 6px', borderRadius: '4px', fontWeight: 'bold' }}>{anime.episodes || '?'} EPS</span>
-                                      <span>• TV</span>
-                                    </div>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          </section>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Right Sidebar (Top Anime) */}
-                  <div className="anikoto-sidebar-col">
-                    <section className="top-anime-widget">
+                {/* Full-Width Grid Layout */}
+                <div className="anikoto-home-full-layout">
+                  {/* Recently Updated & Upcoming Anime Grids */}
+                  {categories.filter(cat => ['Recently Updated', 'Upcoming Anime'].includes(cat.category)).map((cat, idx) => (
+                    <section key={`cat-${idx}`} className="category-section">
                       <div className="section-head">
-                        <h2 className="section-title">Top Anime</h2>
-                        <div className="widget-tabs">
-                          <span className={`tab ${topAnimeTab === 'Day' ? 'active' : ''}`} onClick={() => setTopAnimeTab('Day')}>Day</span>
-                          <span className={`tab ${topAnimeTab === 'Week' ? 'active' : ''}`} onClick={() => setTopAnimeTab('Week')}>Week</span>
-                          <span className={`tab ${topAnimeTab === 'Month' ? 'active' : ''}`} onClick={() => setTopAnimeTab('Month')}>Month</span>
-                        </div>
+                        <h2 className="section-title">{cat.category}</h2>
+                        <span className="view-more" onClick={() => setActiveTab('search')} style={{cursor: 'pointer'}}>View more <ArrowDownWideNarrow size={14} /></span>
                       </div>
-                      <div className="top-anime-list">
-                        {(categories[topAnimeTab === 'Day' ? 0 : topAnimeTab === 'Week' ? 1 : 2]?.anime || []).slice(0, 10).map((anime: any, idx: number) => (
-                          <div key={idx} className={`top-anime-item rank${idx + 1}`} onClick={() => setSelectedAnime(anime)}>
-                            <div className="rank-badge">{idx + 1}</div>
-                            <div className="top-poster">
-                              <img src={anime.cover_url || ''} alt={anime.title} />
-                            </div>
-                            <div className="top-info">
-                              <h3 className="top-title" title={anime.title}>{anime.title}</h3>
-                              <div className="top-meta">
-                                <span className="ep-pill">{anime.episodes || '?'}</span>
-                                <span className="dot">TV</span>
+                      <div className="anime-grid">
+                        {cat.anime.slice(0, 18).map((anime: any, aIdx: number) => (
+                          <div key={aIdx} className="anikoto-card" onClick={() => setSelectedAnime(anime)}>
+                            <div className="poster-container">
+                              {anime.cover_url ? (
+                                <img src={anime.cover_url} alt={anime.title} loading="lazy" />
+                              ) : (
+                                <div className="anime-card-placeholder">
+                                  <ImageIcon size={32} />
+                                </div>
+                              )}
+                              <div className="ep-status-overlay">
+                                <span className="ep-sub"><Type size={10} style={{marginRight: '2px'}}/>{anime.episodes || '?'}</span>
+                                <span className="ep-dub"><Tv size={10} style={{marginRight: '2px'}}/>HD</span>
                               </div>
+                              <div className="poster-hover-details">
+                                <h4 className="hover-title">{anime.title}</h4>
+                                <div className="hover-meta">
+                                  <span>{anime.year || '?'}</span>
+                                  <span>•</span>
+                                  <span>{anime.episodes ? `${anime.episodes} EPS` : '? EPS'}</span>
+                                </div>
+                                <div className="hover-play-btn">
+                                  <Play size={24} fill="white" color="white" />
+                                </div>
+                              </div>
+                            </div>
+                            <div className="card-info">
+                              <h3 className="card-title" title={anime.title}>{anime.title}</h3>
                             </div>
                           </div>
                         ))}
                       </div>
                     </section>
-                  </div>
+                  ))}
+
+                  {/* Top Anime (Now a full-width grid instead of sidebar list) */}
+                  <section className="category-section">
+                    <div className="section-head">
+                      <h2 className="section-title">Top Anime</h2>
+                      <div className="widget-tabs">
+                        <span className={`tab ${topAnimeTab === 'Day' ? 'active' : ''}`} onClick={() => setTopAnimeTab('Day')}>Day</span>
+                        <span className={`tab ${topAnimeTab === 'Week' ? 'active' : ''}`} onClick={() => setTopAnimeTab('Week')}>Week</span>
+                        <span className={`tab ${topAnimeTab === 'Month' ? 'active' : ''}`} onClick={() => setTopAnimeTab('Month')}>Month</span>
+                      </div>
+                    </div>
+                    <div className="anime-grid">
+                      {(categories[topAnimeTab === 'Day' ? 0 : topAnimeTab === 'Week' ? 1 : 2]?.anime || []).slice(0, 18).map((anime: any, idx: number) => (
+                        <div key={`top-${idx}`} className="anikoto-card" onClick={() => setSelectedAnime(anime)}>
+                          <div className="poster-container">
+                            <div className="rank-badge" style={{ position: 'absolute', top: 0, left: 0, background: 'var(--accent-primary)', color: 'black', fontWeight: 'bold', width: '30px', height: '30px', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10, borderBottomRightRadius: '8px', fontSize: '1rem' }}>{idx + 1}</div>
+                            {anime.cover_url ? (
+                              <img src={anime.cover_url} alt={anime.title} loading="lazy" />
+                            ) : (
+                              <div className="anime-card-placeholder"><ImageIcon size={32} /></div>
+                            )}
+                            <div className="ep-status-overlay">
+                              <span className="ep-sub"><Type size={10} style={{marginRight: '2px'}}/>{anime.episodes || '?'}</span>
+                              <span className="ep-dub"><Tv size={10} style={{marginRight: '2px'}}/>HD</span>
+                            </div>
+                            <div className="poster-hover-details">
+                              <h4 className="hover-title">{anime.title}</h4>
+                              <div className="hover-play-btn"><Play size={24} fill="white" color="white" /></div>
+                            </div>
+                          </div>
+                          <div className="card-info">
+                            <h3 className="card-title" title={anime.title}>{anime.title}</h3>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+
+                  {/* New Release & Just Completed (Now full-width grids instead of side-by-side tables) */}
+                  {categories.filter(cat => ['New Release', 'Just Completed'].includes(cat.category)).map((cat, idx) => (
+                    <section key={`table-cat-${idx}`} className="category-section">
+                      <div className="section-head">
+                        <h2 className="section-title">{cat.category}</h2>
+                        <span className="view-more" onClick={() => setActiveTab('search')} style={{cursor: 'pointer'}}>View more <ArrowDownWideNarrow size={14} /></span>
+                      </div>
+                      <div className="anime-grid">
+                        {cat.anime.slice(0, 18).map((anime: any, aIdx: number) => (
+                          <div key={aIdx} className="anikoto-card" onClick={() => setSelectedAnime(anime)}>
+                            <div className="poster-container">
+                              {anime.cover_url ? (
+                                <img src={anime.cover_url} alt={anime.title} loading="lazy" />
+                              ) : (
+                                <div className="anime-card-placeholder"><ImageIcon size={32} /></div>
+                              )}
+                              <div className="ep-status-overlay">
+                                <span className="ep-sub"><Type size={10} style={{marginRight: '2px'}}/>{anime.episodes || '?'}</span>
+                                <span className="ep-dub"><Tv size={10} style={{marginRight: '2px'}}/>HD</span>
+                              </div>
+                              <div className="poster-hover-details">
+                                <h4 className="hover-title">{anime.title}</h4>
+                                <div className="hover-play-btn"><Play size={24} fill="white" color="white" /></div>
+                              </div>
+                            </div>
+                            <div className="card-info">
+                              <h3 className="card-title" title={anime.title}>{anime.title}</h3>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  ))}
                 </div>
               </>
             )}
@@ -935,8 +946,8 @@ function App() {
                   />
                 ) : (
                   <div style={{ padding: '12px 16px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-                    Using your Anikoto library to generate recommendations. 
-                    Titles with high "Worth Level" will be weighted more heavily!
+                    Using your KyōRenzu library to generate recommendations. 
+                    Titles with high "Personal Score" will be weighted more heavily!
                   </div>
                 )}
               </div>
@@ -973,6 +984,19 @@ function App() {
                   onChange={(e) => setAudioPreference(e.target.value)}
                 />
               </div>
+
+              <div className="form-group" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
+                <label className="input-label"><Filter size={14} /> Amount</label>
+                <input 
+                  type="number"
+                  className="input-field"
+                  value={numRecommendations}
+                  onChange={(e) => setNumRecommendations(Number(e.target.value) || 1)}
+                  min="1"
+                  max="100"
+                  style={{ height: '50px' }}
+                />
+              </div>
               
               <div className="form-group" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
                 <button type="submit" className="btn-primary" disabled={discoverLoading}>
@@ -994,37 +1018,44 @@ function App() {
                   <div className="spinner"></div>
                 </div>
               ) : results.length > 0 ? (
-                <div className="gallery-grid">
+                <div className="anime-grid">
                   {results.map((anime, idx) => (
-                    <div key={idx} className="anime-card" onClick={() => setSelectedAnime(anime)}>
-                      <div className="card-badges">
-                        <span className="badge rank">#{anime.rank}</span>
-                        {anime.score && <span className="badge">★ {anime.score.toFixed(1)}</span>}
-                      </div>
-                      
-                      {anime.cover_url ? (
-                        <img src={anime.cover_url} alt={anime.title} className="anime-cover" />
-                      ) : (
-                        <div className="anime-cover" style={{ backgroundColor: '#222', display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }} >
-                          <ImageIcon size={48} opacity={0.3} />
-                        </div>
-                      )}
-
-                      <div className="poster-hover-details">
-                        <h4 className="hover-title">{anime.title}</h4>
-                        <div className="hover-meta">
-                          <span>{anime.year || '?'}</span>
-                          <span>•</span>
-                          <span>{anime.episodes === 1 ? 'Movie' : (anime.episodes ? `${anime.episodes} EPS` : '? EPS')}</span>
-                        </div>
-                        {anime.similarity !== undefined && anime.similarity !== null && (
-                          <div style={{fontSize: '0.85rem', color: '#10b981', marginBottom: '16px', fontWeight: 700}}>
-                            {Math.round(anime.similarity * 100)}% Visual Match
+                    <div key={idx} className="anikoto-card" onClick={() => setSelectedAnime(anime)}>
+                      <div className="poster-container">
+                        <div className="rank-badge" style={{ position: 'absolute', top: 0, left: 0, background: 'var(--accent-primary)', color: 'black', fontWeight: 'bold', padding: '4px 8px', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10, borderBottomRightRadius: '8px', fontSize: '0.9rem' }}>#{anime.rank}</div>
+                        
+                        {anime.cover_url ? (
+                          <img src={anime.cover_url} alt={anime.title} loading="lazy" />
+                        ) : (
+                          <div className="anime-card-placeholder">
+                            <ImageIcon size={32} />
                           </div>
                         )}
-                        <div className="hover-play-btn">
-                          <Play size={24} fill="white" color="white" />
+                        
+                        <div className="ep-status-overlay">
+                          <span className="ep-sub"><Type size={10} style={{marginRight: '2px'}}/>{anime.episodes || '?'}</span>
+                          {anime.score && <span className="ep-dub" style={{background: 'rgba(0,0,0,0.8)'}}><Star size={10} fill="gold" color="gold" style={{marginRight: '2px'}}/>{anime.score.toFixed(1)}</span>}
                         </div>
+                        
+                        <div className="poster-hover-details">
+                          <h4 className="hover-title">{anime.title}</h4>
+                          <div className="hover-meta">
+                            <span>{anime.year || '?'}</span>
+                            <span>•</span>
+                            <span>{anime.episodes === 1 ? 'Movie' : (anime.episodes ? `${anime.episodes} EPS` : '? EPS')}</span>
+                          </div>
+                          {anime.similarity !== undefined && anime.similarity !== null && (
+                            <div style={{fontSize: '0.85rem', color: '#10b981', marginBottom: '16px', fontWeight: 700}}>
+                              {Math.round(anime.similarity * 100)}% Visual Match
+                            </div>
+                          )}
+                          <div className="hover-play-btn">
+                            <Play size={24} fill="white" color="white" />
+                          </div>
+                        </div>
+                      </div>
+                      <div className="card-info">
+                        <h3 className="card-title" title={anime.title}>{anime.title}</h3>
                       </div>
                     </div>
                   ))}
@@ -1089,7 +1120,7 @@ function App() {
                   </button>
                   
                   <h2 style={{ marginBottom: '8px', color: 'white', fontSize: '1.5rem' }}>Import Library</h2>
-                  <p style={{ color: 'var(--text-secondary)' }}>Restore your library from MyAnimeList XML or Anikoto CSV.</p>
+                  <p style={{ color: 'var(--text-secondary)' }}>Restore your library from MyAnimeList XML or KyōRenzu CSV.</p>
 
                   {!importFile ? (
                     <div 
@@ -1587,7 +1618,7 @@ function App() {
         {activeTab !== 'home' && activeTab !== 'discover' && activeTab !== 'library' && activeTab !== 'search' && (
           <div className="page-header">
             <h1 className="page-title" style={{textTransform: 'capitalize'}}>{activeTab}</h1>
-            <p className="page-subtitle">This page is a mockup for the Anikoto-style library interface.</p>
+            <p className="page-subtitle">This page is a mockup for the KyōRenzu-style library interface.</p>
           </div>
         )}
 
@@ -1879,7 +1910,7 @@ function App() {
                         onChange={(e) => setProvider(e.target.value)}
                       >
                         <option value="anidb">Anidb (Default)</option>
-                        <option value="anikoto">Anikoto</option>
+                        <option value="kyorenzu">KyōRenzu</option>
                       </select>
                     </div>
                   </div>

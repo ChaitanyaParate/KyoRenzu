@@ -27,7 +27,7 @@ from recommender import recommend as core_recommend
 from rapidfuzz import fuzz, process
 from mal_scraper import scrape_base, enrich_metadata
 
-app = FastAPI(title="Don't Judge a Book by Its Cover - API")
+app = FastAPI(title="KyōRenzu - API")
 
 def init_db():
     with sqlite3.connect("user_library.db") as conn:
@@ -147,12 +147,12 @@ async def get_recommendations(req: RecommendRequest):
         if req.use_library:
             with sqlite3.connect("user_library.db") as udb:
                 udb_cursor = udb.cursor()
-                udb_cursor.execute("SELECT mal_id, worth_level FROM user_library WHERE status IN ('Completed', 'Watching')")
+                udb_cursor.execute("SELECT mal_id, score FROM user_library WHERE status IN ('Completed', 'Watching')")
                 library_items = udb_cursor.fetchall()
                 
             if library_items:
                 mal_ids = [item[0] for item in library_items]
-                worth_levels = {item[0]: item[1] for item in library_items}
+                library_scores = {item[0]: float(item[1] or 0) for item in library_items}
                 
                 with sqlite3.connect("anime_data.db") as adb:
                     adb.row_factory = sqlite3.Row
@@ -160,11 +160,12 @@ async def get_recommendations(req: RecommendRequest):
                     adb_cursor.execute(f"SELECT mal_id, title_english, title, genres, score, local_image_path FROM anime WHERE mal_id IN ({','.join(map(str, mal_ids))})")
                     for row in adb_cursor.fetchall():
                         mal_id = row['mal_id']
-                        worth = worth_levels.get(mal_id, '').lower()
+                        user_score = library_scores.get(mal_id, 0)
                         
                         weight = 1.0
-                        if 'high' in worth or '++' in worth: weight = 1.5
-                        elif 'low' in worth or '--' in worth: weight = 0.5
+                        if user_score >= 9: weight = 1.5
+                        elif user_score >= 7: weight = 1.2
+                        elif user_score > 0 and user_score <= 4: weight = 0.5
                         
                         liked_anime.append(AnimeEntry(
                             mal_id=mal_id,
@@ -458,7 +459,7 @@ async def get_library():
                 # 2. Fetch Categories via AniList
                 cat_query = """
                 query ($sort: [MediaSort], $status: MediaStatus) {
-                  Page(page: 1, perPage: 15) {
+                  Page(page: 1, perPage: 30) {
                     media(sort: $sort, type: ANIME, status: $status) {
                       idMal
                       title { romaji english }
@@ -512,7 +513,7 @@ async def get_library():
                     if anime_list:
                         library_data.append({
                             "category": cat['name'],
-                            "anime": anime_list
+                            "anime": anime_list[:18]
                         })
                     # AniList rate limits are higher, no strict sleep needed for 4 requests, but adding a small delay just in case
                     await asyncio.sleep(0.1)
