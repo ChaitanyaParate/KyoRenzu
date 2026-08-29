@@ -1,12 +1,12 @@
-# 🎌 Judging Anime By Its Cover (Anikoto Platform)
+# 🎌 KyōRenzu (共レンズ) - Anime Discovery Platform
 
 > *"Don't judge a book by its cover"* — but we absolutely will judge anime by theirs.
 
-Welcome to **Judging Anime By Its Cover**, a next-generation **multimodal AI anime recommendation engine** and **full-stack streaming platform**. This project evolved from a machine-learning research tool into a full-fledged Netflix-style streaming application (Anikoto) with native OS integration.
+Welcome to **KyōRenzu (Resonance Lens)**, a next-generation **multimodal AI anime recommendation engine** and **full-stack streaming platform**. This project evolved from a machine-learning research tool into a full-fledged Netflix-style streaming application with native OS integration.
 
 ## ✨ Epic Feature Overview
 
-### 1. 🖥️ The Anikoto Web Platform
+### 1. 🖥️ The KyōRenzu Web Platform
 - **High-Fidelity React UI**: A stunning, modern, responsive frontend built with React and Vite. Features a dark-mode glassmorphic aesthetic inspired by premium streaming services.
 - **FastAPI Backend**: A lightning-fast Python API bridging the gap between the React frontend, the local SQLite database, and our heavy ML recommendation engines.
 - **Dynamic Hero Banners**: Automatically rotating featured anime banners with HD video playback and details integration.
@@ -47,8 +47,8 @@ Our flagship AI engine can find anime that *looks like Death Note* but has *a re
 
 ### 2. Clone the Repository
 ```bash
-git clone https://github.com/ChaitanyaParate/Judging-Anime-By-Its-Cover.git
-cd Judging-Anime-By-Its-Cover
+git clone https://github.com/ChaitanyaParate/KyoRenzu.git
+cd KyoRenzu
 ```
 
 ### 3. Backend Setup
@@ -70,11 +70,11 @@ cd ..
 
 ### 5. Download the Database & Models
 All large files (embeddings, the 30k+ SQLite DB, and covers) are hosted on Google Drive to save you hours of scraping and embedding.
-- **`anime_data.db`**: Place in the project root.
-- **`cover_embeddings.npy`** / **`synopsis_embeddings.npy`**: Place in the project root.
-- **`covers/` directory**: Extract the 30,000+ local JPEG covers into a folder named `covers/` in the project root.
+- **`anime_data.db`** (24.5 MB): Place in the project root.
+- **`cover_embeddings.npy`** (88.3 MB) & **`synopsis_embeddings.npy`** (33 MB): Place in the project root.
+- **`covers.zip`** (2.51 GB): Extract this ZIP file into a folder named `covers/` in the project root.
 
-*(See the [Drive Link](https://drive.google.com/drive/folders/1uK-QmsqDfnumBUYL23d8LFKXycOW-AWY?usp=sharing) for direct downloads).*
+*(See the [Google Drive Link](https://drive.google.com/drive/u/0/folders/1uK-QmsqDfnumBUYL23d8LFKXycOW-AWY) for direct downloads).*
 
 ### 6. Run the Full Stack Application!
 ```bash
@@ -132,9 +132,9 @@ This spawns an async `multiprocessing` pipeline that manages rate limits, resolv
 ## 📂 Project Structure
 
 ```
-Judging-Anime-By-Its-Cover/
+KyoRenzu/
 ├── api.py                    ← FastAPI backend & playback controller
-├── web/                      ← React/Vite (Anikoto) frontend
+├── web/                      ← React/Vite frontend
 ├── mal_scraper.py            ← Async metadata enricher
 ├── recommender.py            ← ML similarity & ranking logic
 ├── anime_data.db             ← 30k+ local anime database
