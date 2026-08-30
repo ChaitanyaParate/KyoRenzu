@@ -32,6 +32,66 @@ const cleanSynopsis = (text?: string | null) => {
     .trim()
 }
 
+function levenshtein(a: string, b: string): number {
+  const matrix = Array.from({ length: a.length + 1 }, () => 
+    new Array(b.length + 1).fill(0)
+  );
+  for (let i = 0; i <= a.length; i++) matrix[i][0] = i;
+  for (let j = 0; j <= b.length; j++) matrix[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,      // deletion
+        matrix[i][j - 1] + 1,      // insertion
+        matrix[i - 1][j - 1] + cost // substitution
+      );
+    }
+  }
+  return matrix[a.length][b.length];
+}
+
+function fuzzyMatchTitle(query: string, title1?: string | null, title2?: string | null): boolean {
+  if (!query) return true;
+  query = query.toLowerCase();
+  
+  const checkTitle = (t?: string | null) => {
+    if (!t) return false;
+    t = t.toLowerCase();
+    if (t.includes(query)) return true;
+    
+    // Normalize: replace punctuation with spaces
+    const normalize = (str: string) => str.replace(/[^\w\s]/g, ' ').trim();
+    
+    const qWords = normalize(query).split(/\s+/).filter(w => w.length > 0);
+    const tWords = normalize(t).split(/\s+/).filter(w => w.length > 0);
+    
+    if (qWords.length === 0) return true;
+
+    for (let qWord of qWords) {
+      let wordMatched = false;
+      for (let tWord of tWords) {
+        if (tWord.includes(qWord)) {
+          wordMatched = true;
+          break;
+        }
+        if (qWord.length > 3 && tWord.length > 3 && levenshtein(qWord, tWord) <= 1) {
+          wordMatched = true;
+          break;
+        }
+        if (qWord.length > 6 && tWord.length > 6 && levenshtein(qWord, tWord) <= 2) {
+          wordMatched = true;
+          break;
+        }
+      }
+      if (!wordMatched) return false;
+    }
+    return true;
+  };
+  
+  return checkTitle(title1) || checkTitle(title2);
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState('home')
   const [isSidebarExpanded, setIsSidebarExpanded] = useState(false)
@@ -66,6 +126,8 @@ function App() {
   const [userLibrary, setUserLibrary] = useState<any[]>([])
   const [userLibraryLoading, setUserLibraryLoading] = useState(false)
   const [userLibraryStatusFilter, setUserLibraryStatusFilter] = useState('All')
+  const [libraryPage, setLibraryPage] = useState(1);
+  const LIBRARY_ITEMS_PER_PAGE = 48; // Good for both 4-col and 6-col grids
   const [librarySearch, setLibrarySearch] = useState('')
   const [libraryGenre, setLibraryGenre] = useState('')
   const [librarySort, setLibrarySort] = useState('updated_desc')
@@ -258,6 +320,7 @@ function App() {
   const [preference, setPreference] = useState('')
   const [plotPreference, setPlotPreference] = useState('')
   const [audioPreference, setAudioPreference] = useState('')
+  const [preferredYear, setPreferredYear] = useState<string>('')
   const [numRecommendations, setNumRecommendations] = useState(12)
   const [topN] = useState(12)
   const [discoverLoading, setDiscoverLoading] = useState(false)
@@ -384,6 +447,7 @@ function App() {
           preference: preference,
           plot_preference: plotPreference,
           audio_preference: audioPreference,
+          preferred_year: preferredYear ? parseInt(preferredYear, 10) : null,
           top_n: numRecommendations,
           use_library: useLibraryAsRef
         })
@@ -517,7 +581,7 @@ function App() {
 
   useEffect(() => {
     fetchNotifications()
-    const int = setInterval(fetchNotifications, 60000)
+    const int = setInterval(fetchNotifications, 300000)
     return () => clearInterval(int)
   }, [])
 
@@ -674,7 +738,18 @@ function App() {
                   <div className="notification-dropdown-header">Notifications</div>
                   <div className="notification-list">
                     {notifications.length > 0 ? notifications.map((n, i) => (
-                      <div key={i} className={`notification-item ${!n.is_read ? 'unread' : ''}`}>
+                      <div 
+                        key={i} 
+                        className={`notification-item ${!n.is_read ? 'unread' : ''}`}
+                        onClick={() => {
+                          setSelectedAnime(n);
+                          setShowNotifications(false);
+                          if (!n.is_read) {
+                            // Optionally mark it as read immediately if it wasn't already caught by the dropdown open event
+                            markNotificationsRead();
+                          }
+                        }}
+                      >
                         {n.message}
                         <div className="notification-time">{new Date(n.created_at).toLocaleString()}</div>
                       </div>
@@ -985,6 +1060,19 @@ function App() {
                 />
               </div>
 
+              <div className="form-group">
+                <label className="input-label"><CalendarRange size={14} /> Preferred Year</label>
+                <input 
+                  type="number"
+                  className="input-field"
+                  placeholder="e.g. 1998, 2026..."
+                  value={preferredYear}
+                  onChange={(e) => setPreferredYear(e.target.value)}
+                  min="1960"
+                  max="2030"
+                />
+              </div>
+
               <div className="form-group" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
                 <label className="input-label"><Filter size={14} /> Amount</label>
                 <input 
@@ -994,7 +1082,6 @@ function App() {
                   onChange={(e) => setNumRecommendations(Number(e.target.value) || 1)}
                   min="1"
                   max="100"
-                  style={{ height: '50px' }}
                 />
               </div>
               
@@ -1083,7 +1170,7 @@ function App() {
                 </span>
                 
                 <div className="profile-stats">
-                  <div className="stat"><span>Mana</span> <strong>{userLibrary.reduce((acc, item) => acc + (item.episodes_watched || 0), 0)}</strong></div>
+                  <div className="stat"><span>Mana</span> <strong>{userLibrary.reduce((acc, item) => (item.status === 'Watching' || item.status === 'Completed') ? acc + (item.episodes_watched || 0) : acc, 0)}</strong></div>
                   <div className="stat"><span>Join date</span> <strong>Jun 14, 2026</strong></div>
                   <div className="stat"><span>Watch list</span> <strong>{userLibrary.length}</strong></div>
                   <div className="stat" style={{display: 'flex', alignItems: 'center', gap: '8px'}}>
@@ -1260,138 +1347,195 @@ function App() {
             {/* View Mode Rendering */}
             {userLibraryLoading ? (
                <div className="loader-container"><div className="spinner"></div></div>
-            ) : (
-              <div className={libraryViewMode === 'list' ? 'library-list' : 'anime-grid'} style={libraryViewMode === 'grid' ? { padding: '16px' } : {}}>
-                {userLibrary
-                  .filter(item => userLibraryStatusFilter === 'All' || item.status === userLibraryStatusFilter)
-                  .filter(item => !librarySearch || 
-                    (item.title && item.title.toLowerCase().includes(librarySearch.toLowerCase())) ||
-                    (item.title_english && item.title_english.toLowerCase().includes(librarySearch.toLowerCase()))
-                  )
-                  .filter(item => !libraryGenre || (item.genres && item.genres.includes(libraryGenre)))
-                  .filter(item => !librarySeason || (item.season && item.season === librarySeason))
-                  .filter(item => !libraryYear || (item.year && item.year.toString() === libraryYear))
-                  .filter(item => {
-                    if (!libraryScore) return true;
-                    if (!item.score) return false;
-                    const val = parseInt(libraryScore);
-                    if (libraryScoreCondition === '>=') return item.score >= val;
-                    if (libraryScoreCondition === '<=') return item.score <= val;
-                    if (libraryScoreCondition === '=') return item.score === val;
-                    return true;
-                  })
-                  .sort((a, b) => {
-                    if (librarySort === 'updated_desc') return (b.updated_at || 0) - (a.updated_at || 0);
-                    if (librarySort === 'user_score_desc') return (b.score || 0) - (a.score || 0);
-                    if (librarySort === 'global_score_desc') return (b.global_score || 0) - (a.global_score || 0);
-                    if (librarySort === 'progress_desc') return (b.episodes_watched || 0) - (a.episodes_watched || 0);
+            ) : (() => {
+              const filteredAndSorted = userLibrary
+                .filter(item => userLibraryStatusFilter === 'All' || item.status === userLibraryStatusFilter || (userLibraryStatusFilter === 'Planned' && item.status === 'Plan to Watch'))
+                .filter(item => fuzzyMatchTitle(librarySearch, item.title, item.title_english))
+                .filter(item => !libraryGenre || (item.genres && item.genres.includes(libraryGenre)))
+                .filter(item => !librarySeason || (item.season && item.season === librarySeason))
+                .filter(item => !libraryYear || (item.year && item.year.toString() === libraryYear))
+                .filter(item => {
+                  if (!libraryScore) return true;
+                  if (!item.score) return false;
+                  const val = parseInt(libraryScore);
+                  if (libraryScoreCondition === '>=') return item.score >= val;
+                  if (libraryScoreCondition === '<=') return item.score <= val;
+                  if (libraryScoreCondition === '=') return item.score === val;
+                  return true;
+                })
+                .sort((a, b) => {
+                  if (librarySort === 'updated_desc') return (b.updated_at || 0) - (a.updated_at || 0);
+                  if (librarySort === 'user_score_desc') return (b.score || 0) - (a.score || 0);
+                  if (librarySort === 'global_score_desc') return (b.global_score || 0) - (a.global_score || 0);
+                  if (librarySort === 'progress_desc') return (b.episodes_watched || 0) - (a.episodes_watched || 0);
+                  
+                  const titleA = a.title_english || a.title || "";
+                  const titleB = b.title_english || b.title || "";
+                  
+                  if (librarySort === 'title_asc') return titleA.localeCompare(titleB);
+                  if (librarySort === 'title_desc') return titleB.localeCompare(titleA);
+                  
+                  return 0;
+                });
+                
+              const totalPages = Math.ceil(filteredAndSorted.length / LIBRARY_ITEMS_PER_PAGE) || 1;
+              const pagedItems = filteredAndSorted.slice((libraryPage - 1) * LIBRARY_ITEMS_PER_PAGE, libraryPage * LIBRARY_ITEMS_PER_PAGE);
+
+              const renderPagination = () => {
+                if (totalPages <= 1) return null;
+                
+                const pages = [];
+                if (totalPages <= 7) {
+                  for (let i = 1; i <= totalPages; i++) pages.push(i);
+                } else {
+                  if (libraryPage <= 4) {
+                    for (let i = 1; i <= 5; i++) pages.push(i);
+                    pages.push('...', totalPages - 1, totalPages);
+                  } else if (libraryPage >= totalPages - 3) {
+                    pages.push(1, 2, '...');
+                    for (let i = totalPages - 4; i <= totalPages; i++) pages.push(i);
+                  } else {
+                    pages.push(1, 2, '...', libraryPage - 1, libraryPage, libraryPage + 1, '...', totalPages - 1, totalPages);
+                  }
+                }
+                
+                return (
+                  <div className="pagination-container" style={{ display: 'flex', justifyContent: 'center', marginTop: '20px', gap: '4px', background: 'var(--bg-card)', padding: '10px', borderRadius: '8px', width: 'fit-content', margin: '20px auto' }}>
+                    <button 
+                      onClick={() => setLibraryPage(p => Math.max(1, p - 1))}
+                      disabled={libraryPage === 1}
+                      style={{ padding: '6px 12px', background: 'transparent', border: 'none', color: libraryPage === 1 ? 'var(--text-muted)' : 'var(--text-primary)', cursor: libraryPage === 1 ? 'not-allowed' : 'pointer' }}
+                    >‹</button>
                     
-                    const titleA = a.title_english || a.title || "";
-                    const titleB = b.title_english || b.title || "";
+                    {pages.map((p, i) => (
+                      <button
+                        key={i}
+                        onClick={() => typeof p === 'number' && setLibraryPage(p)}
+                        disabled={p === '...'}
+                        style={{
+                          padding: '6px 12px',
+                          background: p === libraryPage ? 'var(--accent-primary)' : 'transparent',
+                          color: p === libraryPage ? 'white' : 'var(--text-primary)',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: p === '...' ? 'default' : 'pointer'
+                        }}
+                      >{p}</button>
+                    ))}
                     
-                    if (librarySort === 'title_asc') return titleA.localeCompare(titleB);
-                    if (librarySort === 'title_desc') return titleB.localeCompare(titleA);
-                    
-                    return 0;
-                  })
-                  .map((item, idx) => {
-                    if (libraryViewMode === 'list') {
-                      return (
-                        <div key={idx} className="library-list-item" onClick={() => setSelectedAnime(item)}>
-                          <div style={{ position: 'relative' }}>
-                            <img src={item.cover_url} alt={item.title} className="library-item-cover" />
-                            {item.status === 'Watching' && (
-                              <button 
-                                className="quick-add-btn" 
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  updateLibraryItem(item.mal_id, { episodes_watched: (item.episodes_watched || 0) + 1 });
-                                }}
-                                title="Watched another episode"
-                              >
-                                +1
-                              </button>
-                            )}
-                          </div>
-                          <div className="library-item-details">
-                            <h3 className="library-item-title">{item.title}</h3>
-                            <div className="library-item-meta">
-                              <span className={`status-dot ${item.status.toLowerCase().replace(' ', '-')}`}></span>
-                              <span>{item.status}</span>
-                              <span className="meta-divider">•</span>
-                              <span>{item.episodes_watched} / {item.total_episodes || '?'} EPS</span>
-                              {item.score > 0 && (
-                                <>
-                                  <span className="meta-divider">•</span>
-                                  <span style={{ color: 'var(--accent-primary)', fontWeight: 'bold' }} title="My Score">My ★ {item.score}</span>
-                                </>
-                              )}
-                              {item.global_score > 0 && (
-                                <>
-                                  <span className="meta-divider">•</span>
-                                  <span style={{ color: 'var(--text-secondary)' }} title="MAL Global Score">MAL ★ {item.global_score.toFixed(2)}</span>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    } else {
-                      // Grid View rendering
-                      return (
-                        <div key={idx} className="anikoto-card" onClick={() => setSelectedAnime(item)}>
-                          <div className="poster-container">
-                            {item.cover_url ? (
-                              <img src={item.cover_url} alt={item.title} loading="lazy" />
-                            ) : (
-                              <div className="anime-card-placeholder">
-                                <ImageIcon size={32} />
-                              </div>
-                            )}
-                            <div className="ep-status-overlay">
-                              <span className="ep-sub" style={{ background: 'rgba(0,0,0,0.7)', padding: '2px 6px', borderRadius: '4px' }}>
-                                <Type size={10} style={{marginRight: '2px'}}/>{item.episodes_watched} / {item.total_episodes || '?'}
-                              </span>
-                            </div>
-                            {item.status === 'Watching' && (
-                              <button 
-                                className="quick-add-btn" 
-                                style={{ zIndex: 10, width: '32px', height: '32px', fontSize: '1rem', borderRadius: '8px 0 0 0' }}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  updateLibraryItem(item.mal_id, { episodes_watched: (item.episodes_watched || 0) + 1 });
-                                }}
-                                title="Watched another episode"
-                              >
-                                +1
-                              </button>
-                            )}
-                            <div className="poster-hover-details">
-                              <h4 className="hover-title">{item.title}</h4>
-                              <div className="hover-meta">
-                                <span>{item.status}</span>
-                                <span>•</span>
-                                <span>★ {item.score > 0 ? item.score : (item.global_score ? item.global_score.toFixed(1) : '?')}</span>
-                              </div>
-                              <div className="hover-play-btn">
-                                <Play size={24} fill="white" color="white" />
-                              </div>
-                            </div>
-                          </div>
-                          <div className="card-info">
-                            <h3 className="card-title">{item.title}</h3>
-                          </div>
-                        </div>
-                      );
-                    }
-                  })}
-                {userLibrary.length === 0 && (
-                  <div style={{textAlign: 'center', padding: '40px', color: '#8a8d98'}}>
-                    Your watch list is empty. Add anime from the Discover tab!
+                    <button 
+                      onClick={() => setLibraryPage(p => Math.min(totalPages, p + 1))}
+                      disabled={libraryPage === totalPages}
+                      style={{ padding: '6px 12px', background: 'transparent', border: 'none', color: libraryPage === totalPages ? 'var(--text-muted)' : 'var(--text-primary)', cursor: libraryPage === totalPages ? 'not-allowed' : 'pointer' }}
+                    >›</button>
                   </div>
-                )}
-              </div>
-            )}
+                );
+              };
+
+              return (
+                <>
+                  <div className={libraryViewMode === 'list' ? 'library-list' : 'anime-grid'} style={libraryViewMode === 'grid' ? { padding: '16px' } : {}}>
+                    {pagedItems.map((item, idx) => {
+                      if (libraryViewMode === 'list') {
+                        return (
+                          <div key={idx} className="library-list-item" onClick={() => setSelectedAnime(item)}>
+                            <div style={{ position: 'relative' }}>
+                              <img src={item.cover_url} alt={item.title} className="library-item-cover" />
+                              {item.status === 'Watching' && (
+                                <button 
+                                  className="quick-add-btn" 
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    updateLibraryItem(item.mal_id, { episodes_watched: (item.episodes_watched || 0) + 1 });
+                                  }}
+                                  title="Watched another episode"
+                                >
+                                  +1
+                                </button>
+                              )}
+                            </div>
+                            <div className="library-item-details">
+                              <h3 className="library-item-title">{item.title}</h3>
+                              <div className="library-item-meta">
+                                <span className={`status-dot ${item.status.toLowerCase().replace(' ', '-')}`}></span>
+                                <span>{item.status}</span>
+                                <span className="meta-divider">•</span>
+                                <span>{item.episodes_watched} / {item.total_episodes || '?'} EPS</span>
+                                {item.score > 0 && (
+                                  <>
+                                    <span className="meta-divider">•</span>
+                                    <span style={{ color: 'var(--accent-primary)', fontWeight: 'bold' }} title="My Score">My ★ {item.score}</span>
+                                  </>
+                                )}
+                                {item.global_score > 0 && (
+                                  <>
+                                    <span className="meta-divider">•</span>
+                                    <span style={{ color: 'var(--text-secondary)' }} title="MAL Global Score">MAL ★ {item.global_score.toFixed(2)}</span>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      } else {
+                        // Grid View rendering
+                        return (
+                          <div key={idx} className="anikoto-card" onClick={() => setSelectedAnime(item)}>
+                            <div className="poster-container">
+                              {item.cover_url ? (
+                                <img src={item.cover_url} alt={item.title} loading="lazy" />
+                              ) : (
+                                <div className="anime-card-placeholder">
+                                  <ImageIcon size={32} />
+                                </div>
+                              )}
+                              <div className="ep-status-overlay">
+                                <span className="ep-sub" style={{ background: 'rgba(0,0,0,0.7)', padding: '2px 6px', borderRadius: '4px' }}>
+                                  <Type size={10} style={{marginRight: '2px'}}/>{item.episodes_watched} / {item.total_episodes || '?'}
+                                </span>
+                              </div>
+                              {item.status === 'Watching' && (
+                                <button 
+                                  className="quick-add-btn" 
+                                  style={{ zIndex: 10, width: '32px', height: '32px', fontSize: '1rem', borderRadius: '8px 0 0 0' }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    updateLibraryItem(item.mal_id, { episodes_watched: (item.episodes_watched || 0) + 1 });
+                                  }}
+                                  title="Watched another episode"
+                                >
+                                  +1
+                                </button>
+                              )}
+                              <div className="poster-hover-details">
+                                <h4 className="hover-title">{item.title}</h4>
+                                <div className="hover-meta">
+                                  <span>{item.status}</span>
+                                  <span>•</span>
+                                  <span>★ {item.score > 0 ? item.score : (item.global_score ? item.global_score.toFixed(1) : '?')}</span>
+                                </div>
+                                <div className="hover-play-btn">
+                                  <Play size={24} fill="white" color="white" />
+                                </div>
+                              </div>
+                            </div>
+                            <div className="card-info">
+                              <h3 className="card-title">{item.title}</h3>
+                            </div>
+                          </div>
+                        );
+                      }
+                    })}
+                    {filteredAndSorted.length === 0 && (
+                      <div style={{textAlign: 'center', padding: '40px', color: '#8a8d98', gridColumn: '1 / -1'}}>
+                        Your watch list is empty. Add anime from the Discover tab!
+                      </div>
+                    )}
+                  </div>
+                  {renderPagination()}
+                </>
+              );
+            })()}
           </div>
         )}
         
@@ -1411,7 +1555,7 @@ function App() {
                   <input 
                     type="text" 
                     className="search-main-input" 
-                    placeholder="Any" 
+                    placeholder="Search anime..." 
                     value={searchQuery}
                     onChange={e => setSearchQuery(e.target.value)}
                   />
@@ -1652,6 +1796,9 @@ function App() {
                     )}
                     <span className="stat-item"><Tv size={16} /> Format: {selectedAnime.type || ((selectedAnime.episodes || selectedAnime.total_episodes) === 1 ? 'Movie' : 'TV Series')}</span>
                     <span className="stat-item"><Play size={16} /> Episodes: {dynamicEpisodes || selectedAnime.episodes || selectedAnime.total_episodes || '?'}</span>
+                    {selectedAnime.year && (
+                      <span className="stat-item"><CalendarRange size={16} /> Released: {selectedAnime.year}</span>
+                    )}
                     {selectedAnime.members && (
                       <span className="stat-item">Reviews: {selectedAnime.members?.toLocaleString() || "N/A"}</span>
                     )}
@@ -1725,15 +1872,15 @@ function App() {
                               type="range"
                               min="0"
                               max="10"
-                              step="1"
+                              step="0.5"
                               style={{ width: '100%', cursor: 'pointer', accentColor: 'var(--accent-primary)' }}
                               value={libItem.score || 0}
                               onChange={(e) => {
-                                const val = parseInt(e.target.value) || 0;
+                                const val = parseFloat(e.target.value) || 0;
                                 setUserLibrary(prev => prev.map(i => i.mal_id === libItem.mal_id ? { ...i, score: val } : i));
                               }}
-                              onMouseUp={(e) => updateLibraryItem(libItem.mal_id, { score: parseInt(e.currentTarget.value) || 0 })}
-                              onTouchEnd={(e) => updateLibraryItem(libItem.mal_id, { score: parseInt(e.currentTarget.value) || 0 })}
+                              onMouseUp={(e) => updateLibraryItem(libItem.mal_id, { score: parseFloat(e.currentTarget.value) || 0 })}
+                              onTouchEnd={(e) => updateLibraryItem(libItem.mal_id, { score: parseFloat(e.currentTarget.value) || 0 })}
                             />
                           </div>
                           
@@ -1901,18 +2048,7 @@ function App() {
                         })
                       )}
                     </div>
-                    
-                    <div className="anikoto-settings-item">
-                      <span className="anikoto-settings-label">Source</span>
-                      <select 
-                        className="anikoto-settings-select"
-                        value={provider}
-                        onChange={(e) => setProvider(e.target.value)}
-                      >
-                        <option value="anidb">Anidb (Default)</option>
-                        <option value="kyorenzu">KyōRenzu</option>
-                      </select>
-                    </div>
+
                   </div>
                 </div>
               </div>

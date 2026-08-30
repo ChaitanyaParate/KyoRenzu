@@ -65,12 +65,6 @@ ALIAS_TO_MAL_ID: dict[str, int] = {
 
 
 
-# Worth Level → numeric weight mapping
-WORTH_WEIGHTS: dict[str, float] = {
-    "high": 1.5,
-    "medium": 1.0,
-    "low": 0.3,
-}
 
 MAL_URL_PATTERN = r"(?:https?://)?myanimelist\.net/(?:animelist|profile)/([^/?#]+)"
 ANILIST_URL_PATTERN = r"(?:https?://)?anilist\.co/user/([^/?#]+)"
@@ -247,31 +241,40 @@ def _resolve_dataframe(df: pd.DataFrame) -> list[AnimeEntry]:
 
     print(f"  [input_parser] Using column '{title_col}' as anime titles.")
 
-    # ── 4. Detect optional Worth Level column ────────────────────────────────
-    WORTH_KEYWORDS = ["worth", "priority", "rating", "tier", "rank"]
-    worth_col = None
-    for keyword in WORTH_KEYWORDS:
+    # ── 4. Detect optional Score column ────────────────────────────────
+    SCORE_KEYWORDS = ["score", "rating", "my_score", "your score"]
+    score_col = None
+    for keyword in SCORE_KEYWORDS:
         for col in df.columns:
             if keyword in col:
-                worth_col = col
+                score_col = col
                 break
-        if worth_col:
+        if score_col:
             break
 
-    if worth_col:
-        print(f"  [input_parser] Found worth/priority column: '{worth_col}' — weighting embeddings.")
+    if score_col:
+        print(f"  [input_parser] Found score column: '{score_col}' — weighting embeddings.")
 
     titles = df[title_col].dropna().astype(str).str.strip().tolist()
     # Build (title, weight) pairs
-    worth_series = df[worth_col].astype(str).str.strip().str.lower() if worth_col else None
+    score_series = pd.to_numeric(df[score_col], errors='coerce').fillna(0) if score_col else None
     title_weight_pairs = []
     for i, t in enumerate(df[title_col].astype(str).str.strip()):
         if not t or t.lower() == 'nan':
             continue
         w = 1.0
-        if worth_series is not None:
-            raw = worth_series.iloc[i] if i < len(worth_series) else "medium"
-            w = WORTH_WEIGHTS.get(raw, 1.0)
+        if score_series is not None:
+            score = score_series.iloc[i] if i < len(score_series) else 0
+            # Scale score to weight
+            if score == 0: w = 1.0
+            elif score >= 9.5: w = 2.0
+            elif score >= 8.5: w = 1.6
+            elif score >= 7.5: w = 1.2
+            elif score >= 6.5: w = 1.0
+            elif score >= 5.5: w = 0.8
+            elif score >= 4.0: w = 0.5
+            elif score >= 2.0: w = 0.3
+            else: w = 0.1
         title_weight_pairs.append((t, w))
     return _resolve_titles_weighted(title_weight_pairs)
 
@@ -351,14 +354,15 @@ def _fetch_mal_user_list(username: str) -> list[tuple[int, float]]:
                     continue
                     
                 # Map score to weight
-                if score == 0:
-                    weight = 1.0
-                elif score >= 8:
-                    weight = 1.5
-                elif score >= 5:
-                    weight = 1.0
-                else:
-                    weight = 0.3
+                if score == 0: weight = 1.0
+                elif score >= 9.5: weight = 2.0
+                elif score >= 8.5: weight = 1.6
+                elif score >= 7.5: weight = 1.2
+                elif score >= 6.5: weight = 1.0
+                elif score >= 5.5: weight = 0.8
+                elif score >= 4.0: weight = 0.5
+                elif score >= 2.0: weight = 0.3
+                else: weight = 0.1
                     
                 results.append((mal_id, weight))
                 
@@ -406,17 +410,32 @@ def _fetch_anilist_user_list(username: str) -> list[tuple[int, float]]:
                 
                 score = entry.get('score', 0)
                 
-                # Normalize AniList scores (handles 100-pt, 10-pt, and 5-star)
+                # Normalize AniList scores to 10-point scale first
+                norm_score = 0
                 if score == 0:
-                    weight = 1.0
+                    pass
                 elif score > 10:  # 100-point scale
-                    if score >= 80: weight = 1.5
-                    elif score >= 50: weight = 1.0
-                    else: weight = 0.3
-                else:  # 10-point or 5-star
-                    if score >= 8.0 or (0 < score <= 5.0 and score >= 4.0): weight = 1.5
-                    elif score >= 5.0 or (0 < score <= 5.0 and score >= 2.5): weight = 1.0
-                    else: weight = 0.3
+                    norm_score = score / 10.0
+                elif 0 < score <= 5.0 and score.is_integer(): # 5-star scale (approximate heuristic: integers 1-5)
+                    # It's hard to perfectly guess 5-star vs 10-point if it's 1-5. 
+                    # Assuming AniList standard 10-point decimal is common, 
+                    # but if it's 5-star, a 5 = 10, 4 = 8, 3 = 6. 
+                    # Let's just treat everything <= 10 as a 10-point scale.
+                    # If it was actually 5-star, users should switch to 10-point on Anilist or we just double it.
+                    # For safety, let's assume 10-point scale if it's not > 10.
+                    norm_score = float(score)
+                else:
+                    norm_score = float(score)
+
+                if norm_score == 0: weight = 1.0
+                elif norm_score >= 9.5: weight = 2.0
+                elif norm_score >= 8.5: weight = 1.6
+                elif norm_score >= 7.5: weight = 1.2
+                elif norm_score >= 6.5: weight = 1.0
+                elif norm_score >= 5.5: weight = 0.8
+                elif norm_score >= 4.0: weight = 0.5
+                elif norm_score >= 2.0: weight = 0.3
+                else: weight = 0.1
                     
                 results.append((mal_id, weight))
                 

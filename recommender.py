@@ -48,12 +48,12 @@ W_AUDIO = 0.10  # audio theme similarity
 W_SCORE = 0.28  # MAL community score
 W_POP = 0.17    # MAL member count (popularity)
 W_GENRE = 0.25  # genre relevance (0 when no genre filter; 0→1 based on overlap fraction)
-W_ERA = 0.10    # era proximity (Gaussian around user's preferred year)
+W_ERA = 0.50    # era proximity (Gaussian around user's preferred year)
 
 # Era scoring: Gaussian std-dev in years.
-# sigma=8 → an anime 8 years away from target scores ~0.61, 16 years away ~0.14.
-# Kept wide so "classic" fans still see some 2000s anime and vice-versa.
-ERA_SIGMA = 8.0
+# sigma=5 → an anime 5 years away from target scores ~0.36, 10 years away ~0.02.
+# Tightened to make explicit year preferences much stronger.
+ERA_SIGMA = 5.0
 
 
 # Minimum score threshold for candidates

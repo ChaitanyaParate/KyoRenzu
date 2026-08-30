@@ -24,8 +24,16 @@ import urllib.parse
 from input_parser import auto_parse, get_all_raw_titles, _resolve_by_ids, _load_title_map, AnimeEntry
 from preference_encoder import EncodedPreference
 from recommender import recommend as core_recommend
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz, process, utils
 from mal_scraper import scrape_base, enrich_metadata
+
+import logging
+
+class EndpointFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "/api/notifications" not in record.getMessage()
+
+logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
 app = FastAPI(title="KyōRenzu - API")
 
@@ -37,12 +45,11 @@ def init_db():
                 status TEXT DEFAULT 'Watching',
                 episodes_watched INTEGER DEFAULT 0,
                 score REAL DEFAULT 0,
-                worth_level TEXT DEFAULT '',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         try:
-            conn.execute("ALTER TABLE user_library ADD COLUMN worth_level TEXT DEFAULT ''")
+            conn.execute("ALTER TABLE user_library ADD COLUMN anime_title TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass # Column already exists
         
@@ -163,9 +170,15 @@ async def get_recommendations(req: RecommendRequest):
                         user_score = library_scores.get(mal_id, 0)
                         
                         weight = 1.0
-                        if user_score >= 9: weight = 1.5
-                        elif user_score >= 7: weight = 1.2
-                        elif user_score > 0 and user_score <= 4: weight = 0.5
+                        if user_score == 0: weight = 1.0
+                        elif user_score >= 9.5: weight = 2.0
+                        elif user_score >= 8.5: weight = 1.6
+                        elif user_score >= 7.5: weight = 1.2
+                        elif user_score >= 6.5: weight = 1.0
+                        elif user_score >= 5.5: weight = 0.8
+                        elif user_score >= 4.0: weight = 0.5
+                        elif user_score >= 2.0: weight = 0.3
+                        else: weight = 0.1
                         
                         liked_anime.append(AnimeEntry(
                             mal_id=mal_id,
@@ -553,10 +566,10 @@ if os.path.exists("themes"):
 
 class UserLibraryUpdate(BaseModel):
     mal_id: int
+    anime_title: Optional[str] = None
     status: Optional[str] = None
     episodes_watched: Optional[int] = None
     score: Optional[float] = None
-    worth_level: Optional[str] = None
     notes: Optional[str] = None
 
 @app.delete("/api/user_library/{mal_id}")
@@ -611,7 +624,7 @@ async def get_user_library():
             cursor.execute("ATTACH DATABASE 'anime_data.db' AS anime_db")
             cursor.execute("""
                 SELECT 
-                    u.mal_id, u.status, u.episodes_watched, u.score, u.worth_level, u.updated_at, u.notes,
+                    u.mal_id, u.status, u.episodes_watched, u.score, u.updated_at, u.notes,
                     a.title, a.title_english, a.genres, a.episodes as total_episodes,
                     a.season, a.year, a.image_url, a.local_image_path, a.synopsis, a.score as global_score
                 FROM user_library u
@@ -638,33 +651,43 @@ async def update_user_library(update: UserLibraryUpdate):
         with sqlite3.connect("user_library.db") as conn:
             cursor = conn.cursor()
             
+            # Fetch title if missing
+            title = update.anime_title
+            if not title:
+                with sqlite3.connect("anime_data.db") as conn2:
+                    c2 = conn2.cursor()
+                    c2.execute("SELECT title_english, title FROM anime WHERE mal_id = ?", (update.mal_id,))
+                    row2 = c2.fetchone()
+                    if row2:
+                        title = row2[0] or row2[1]
+            
             # Check if exists
-            cursor.execute("SELECT status, episodes_watched, score, worth_level, notes FROM user_library WHERE mal_id = ?", (update.mal_id,))
+            cursor.execute("SELECT status, episodes_watched, score, notes, anime_title FROM user_library WHERE mal_id = ?", (update.mal_id,))
             row = cursor.fetchone()
             
             if row:
                 new_status = update.status if update.status is not None else row[0]
                 new_episodes = update.episodes_watched if update.episodes_watched is not None else row[1]
                 new_score = update.score if update.score is not None else row[2]
-                new_worth = update.worth_level if update.worth_level is not None else row[3]
-                new_notes = update.notes if update.notes is not None else row[4]
+                new_notes = update.notes if update.notes is not None else row[3]
+                new_title = title if title is not None else row[4]
                 
                 cursor.execute("""
                     UPDATE user_library 
-                    SET status = ?, episodes_watched = ?, score = ?, worth_level = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+                    SET status = ?, episodes_watched = ?, score = ?, notes = ?, anime_title = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE mal_id = ?
-                """, (new_status, new_episodes, new_score, new_worth, new_notes, update.mal_id))
+                """, (new_status, new_episodes, new_score, new_notes, new_title, update.mal_id))
             else:
                 new_status = update.status if update.status is not None else 'Watching'
                 new_episodes = update.episodes_watched if update.episodes_watched is not None else 0
                 new_score = update.score if update.score is not None else 0
-                new_worth = update.worth_level if update.worth_level is not None else ''
                 new_notes = update.notes if update.notes is not None else ''
+                new_title = title if title is not None else ''
                 
                 cursor.execute("""
-                    INSERT INTO user_library (mal_id, status, episodes_watched, score, worth_level, notes)
+                    INSERT INTO user_library (mal_id, status, episodes_watched, score, notes, anime_title)
                     VALUES (?, ?, ?, ?, ?, ?)
-                """, (update.mal_id, new_status, new_episodes, new_score, new_worth, new_notes))
+                """, (update.mal_id, new_status, new_episodes, new_score, new_notes, new_title))
             
             conn.commit()
             return {"status": "success"}
@@ -689,7 +712,7 @@ async def export_user_library(format: str = "xml"):
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT u.mal_id, u.status, u.episodes_watched, u.score, u.worth_level
+                SELECT u.mal_id, u.status, u.episodes_watched, u.score
                 FROM user_library u
             """)
             rows = cursor.fetchall()
@@ -717,7 +740,7 @@ async def export_user_library(format: str = "xml"):
         if format == "csv":
             output = io.StringIO()
             writer = csv.writer(output)
-            writer.writerow(["ID", "title", "status", "score", "episodes_watched", "total_episodes", "worth_level"])
+            writer.writerow(["ID", "title", "status", "score", "episodes_watched", "total_episodes"])
             for r in rows:
                 mal_id = r['mal_id']
                 info = anime_info.get(mal_id, {})
@@ -729,8 +752,7 @@ async def export_user_library(format: str = "xml"):
                     status_map.get(r['status'], r['status']),
                     r['score'],
                     r['episodes_watched'],
-                    total_episodes,
-                    r['worth_level']
+                    total_episodes
                 ])
             return Response(content=output.getvalue(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=library_export.csv"})
         
@@ -754,6 +776,7 @@ async def export_user_library(format: str = "xml"):
                 ET.SubElement(anime, "my_watched_episodes").text = str(r['episodes_watched'])
                 ET.SubElement(anime, "my_score").text = str(r['score'])
                 ET.SubElement(anime, "my_status").text = status_map.get(r['status'], r['status'])
+                ET.SubElement(anime, "update_on_import").text = "1"
                 
             xml_str = ET.tostring(root, encoding='unicode', xml_declaration=False)
             xml_str = xml.dom.minidom.parseString(xml_str).toprettyxml(indent="\t")
@@ -811,13 +834,11 @@ async def import_user_library(file: UploadFile = File(...), overwrite: bool = Fo
                         episodes_watched = int(ep_str) if ep_str else 0
                     except ValueError:
                         episodes_watched = 0
-                    worth_level = row.get('worth_level', '') or row.get('Worth Level', '')
-                    
                     # Fetch base info to check for overflow
                     adb_cursor.execute("SELECT title_english, title, episodes FROM anime WHERE mal_id = ?", (mal_id,))
                     base_res = adb_cursor.fetchone()
                     if not base_res:
-                        imported_entries.append((mal_id, status, episodes_watched, score, worth_level))
+                        imported_entries.append((mal_id, status, episodes_watched, score))
                         continue
                         
                     base_total_eps = base_res[2] or 0
@@ -825,7 +846,7 @@ async def import_user_library(file: UploadFile = File(...), overwrite: bool = Fo
                     
                     if base_total_eps > 0 and episodes_watched > base_total_eps:
                         # Distribute Overflow
-                        imported_entries.append((mal_id, "Completed", base_total_eps, score, worth_level))
+                        imported_entries.append((mal_id, "Completed", base_total_eps, score))
                         remaining = episodes_watched - base_total_eps
                         
                         # Extract core franchise name
@@ -864,13 +885,13 @@ async def import_user_library(file: UploadFile = File(...), overwrite: bool = Fo
                                 continue
                                 
                             if remaining >= rel_eps:
-                                imported_entries.append((rel_id, "Completed", rel_eps, score, worth_level))
+                                imported_entries.append((rel_id, "Completed", rel_eps, score))
                                 remaining -= rel_eps
                             else:
-                                imported_entries.append((rel_id, "Watching", remaining, score, worth_level))
+                                imported_entries.append((rel_id, "Watching", remaining, score))
                                 remaining = 0
                     else:
-                        imported_entries.append((mal_id, status, episodes_watched, score, worth_level))
+                        imported_entries.append((mal_id, status, episodes_watched, score))
                 
         elif file.filename.endswith(".xml"):
             root = ET.fromstring(content)
@@ -888,7 +909,7 @@ async def import_user_library(file: UploadFile = File(...), overwrite: bool = Fo
                 eps_el = anime.find('my_watched_episodes')
                 episodes_watched = int(eps_el.text) if eps_el is not None and eps_el.text else 0
                 
-                imported_entries.append((mal_id, status, episodes_watched, score, ""))
+                imported_entries.append((mal_id, status, episodes_watched, score))
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format")
 
@@ -897,19 +918,19 @@ async def import_user_library(file: UploadFile = File(...), overwrite: bool = Fo
             if overwrite:
                 cursor.execute("DELETE FROM user_library")
             
-            for mal_id, status, episodes_watched, score, worth_level in imported_entries:
+            for mal_id, status, episodes_watched, score in imported_entries:
                 cursor.execute("SELECT mal_id FROM user_library WHERE mal_id = ?", (mal_id,))
                 if cursor.fetchone():
                     cursor.execute("""
                         UPDATE user_library 
-                        SET status = ?, episodes_watched = ?, score = ?, worth_level = ?, updated_at = CURRENT_TIMESTAMP
+                        SET status = ?, episodes_watched = ?, score = ?, updated_at = CURRENT_TIMESTAMP
                         WHERE mal_id = ?
-                    """, (status, episodes_watched, score, worth_level, mal_id))
+                    """, (status, episodes_watched, score, mal_id))
                 else:
                     cursor.execute("""
-                        INSERT INTO user_library (mal_id, status, episodes_watched, score, worth_level)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (mal_id, status, episodes_watched, score, worth_level))
+                        INSERT INTO user_library (mal_id, status, episodes_watched, score)
+                        VALUES (?, ?, ?, ?)
+                    """, (mal_id, status, episodes_watched, score))
             conn.commit()
             
         return {"status": "success", "imported": len(imported_entries)}
@@ -949,15 +970,31 @@ async def search_anime(
                     if info['title_japanese']: candidates.append((mid, info['title_japanese']))
                 
                 choices = [c[1] for c in candidates]
-                # Extract top 50 matches using WRatio
-                results_fuzzy = process.extract(q, choices, scorer=fuzz.WRatio, limit=50)
+                # Extract top 500 matches using WRatio (case-insensitive)
+                results_fuzzy = process.extract(q, choices, scorer=fuzz.WRatio, processor=utils.default_process, limit=500)
+                
+                refined_matches = []
+                for match_str, score, idx in results_fuzzy:
+                    penalty = 0
+                    if len(match_str) < len(q):
+                        # Subtract up to 50 points if the match is significantly shorter than the query
+                        ratio = len(match_str) / max(1, len(q))
+                        if ratio < 0.8:
+                            penalty = (0.8 - ratio) * 50
+                    
+                    final_score = score - penalty
+                    if final_score > 50:
+                        refined_matches.append((final_score, candidates[idx][0]))
+                        
+                # Sort by highest final score
+                refined_matches.sort(key=lambda x: x[0], reverse=True)
                 
                 matched_ids = []
-                for match_str, score, idx in results_fuzzy:
-                    if score > 50: # Minimum confidence threshold
-                        mal_id = candidates[idx][0]
-                        if mal_id not in matched_ids:
-                            matched_ids.append(mal_id)
+                for score, mal_id in refined_matches:
+                    if mal_id not in matched_ids:
+                        matched_ids.append(mal_id)
+                        if len(matched_ids) >= 100:
+                            break
                 
                 if matched_ids:
                     placeholders = ",".join("?" for _ in matched_ids)
@@ -1232,8 +1269,25 @@ async def get_notifications():
     try:
         with sqlite3.connect("user_library.db") as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute("SELECT * FROM notifications ORDER BY created_at DESC LIMIT 50").fetchall()
-            return [dict(r) for r in rows]
+            conn.execute("ATTACH DATABASE 'anime_data.db' AS anime_db")
+            rows = conn.execute("""
+                SELECT n.*, a.title_english, a.genres, a.episodes as total_episodes, a.season, a.year, a.image_url, a.local_image_path, a.synopsis, a.score as global_score
+                FROM notifications n
+                LEFT JOIN anime_db.anime a ON n.mal_id = a.mal_id
+                ORDER BY n.created_at DESC 
+                LIMIT 50
+            """).fetchall()
+            
+            results = []
+            for r in rows:
+                d = dict(r)
+                if d.get('local_image_path'):
+                    d['cover_url'] = f"http://localhost:8000/covers/{os.path.basename(d['local_image_path'])}"
+                else:
+                    d['cover_url'] = d.get('image_url')
+                results.append(d)
+                
+            return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
