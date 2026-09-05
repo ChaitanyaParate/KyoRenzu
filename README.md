@@ -9,6 +9,7 @@ Welcome to **KyōRenzu (Resonance Lens)**, a next-generation **multimodal AI ani
 ### 1. 🖥️ The KyōRenzu Web Platform
 - **High-Fidelity React UI**: A stunning, modern, responsive frontend built with React and Vite. Features a dark-mode glassmorphic aesthetic inspired by premium streaming services.
 - **FastAPI Backend**: A lightning-fast Python API bridging the gap between the React frontend, the local SQLite database, and our heavy ML recommendation engines.
+- **Dynamic OTA Self-Healing**: The app continuously syncs with the AniList GraphQL API. If it spots missing "Trending" or "Recently Updated" anime, it dynamically inserts the metadata and uses non-blocking background tasks to fetch the HD cover art. Your local dataset stays perfectly up to date forever!
 - **Dynamic Hero Banners**: Automatically rotating featured anime banners with HD video playback and details integration.
 
 ### 2. 🍿 Native Video Streaming (`ani-cli` Integration)
@@ -39,49 +40,41 @@ Our flagship AI engine can find anime that *looks like Death Note* but has *a re
 
 ## 🚀 Getting Started
 
-### 1. Prerequisites
-- Python 3.10+
-- Node.js 18+ (for Vite frontend)
-- [mpv](https://mpv.io/) (required for native video playback via `ani-cli`)
-- `curl`, `grep`, `fzf` (standard Linux/macOS utils for `ani-cli`)
+### 1. Run the AppImage (Linux)
+KyoRenzu is packaged as a **lightweight OTA AppImage**. 
+The application will automatically download all heavy datasets (the 30k+ SQLite DB, ML embeddings, and 2.5GB of covers) from Google Drive on your very first launch.
 
-### 2. Clone the Repository
+```bash
+# Example if downloading from releases:
+chmod +x KyoRenzu-1.0.0.AppImage
+./KyoRenzu-1.0.0.AppImage
+```
+
+*(Note: The first launch will display an "Initial Setup" overlay while it fetches the 2.7GB of assets. These are cached permanently in `~/.local/share/KyoRenzu/` so subsequent launches are instant).*
+
+### 2. Building from Source
+If you want to run or package the project manually:
+
+**Prerequisites:**
+- Python 3.10+ and Node.js 18+
+- [mpv](https://mpv.io/) (required for native video playback via `ani-cli`)
+- `curl`, `grep`, `fzf` (standard Linux utils for `ani-cli`)
+
 ```bash
 git clone https://github.com/ChaitanyaParate/KyoRenzu.git
 cd KyoRenzu
-```
 
-### 3. Backend Setup
-```bash
-# Create and activate a virtual environment
+# 1. Setup Python Backend
 python -m venv venv
 source venv/bin/activate
-
-# Install Python dependencies
 pip install -r requirements.txt
+
+# 2. Setup React Frontend
+cd web && npm install && cd ..
+
+# 3. Build the OTA AppImage
+npm run build
 ```
-
-### 4. Frontend Setup
-```bash
-cd web
-npm install
-cd ..
-```
-
-### 5. Download the Database & Models
-All large files (embeddings, the 30k+ SQLite DB, and covers) are hosted on Google Drive to save you hours of scraping and embedding.
-- **`anime_data.db`** (24.5 MB): Place in the project root.
-- **`cover_embeddings.npy`** (88.3 MB) & **`synopsis_embeddings.npy`** (33 MB): Place in the project root.
-- **`covers.zip`** (2.51 GB): Extract this ZIP file into a folder named `covers/` in the project root.
-
-*(See the [Google Drive Link](https://drive.google.com/drive/u/0/folders/1uK-QmsqDfnumBUYL23d8LFKXycOW-AWY) for direct downloads).*
-
-### 6. Run the Full Stack Application!
-```bash
-# Run the startup script which launches FastAPI and Vite concurrently
-./start.sh --reload
-```
-The application will be available at **`http://localhost:5173`**.
 
 ---
 

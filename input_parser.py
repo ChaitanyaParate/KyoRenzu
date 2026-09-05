@@ -10,8 +10,9 @@ from rapidfuzz import process, fuzz
 from typing import NamedTuple
 import re
 import requests
+from config import ANIME_DATA_DB_PATH
 
-DB_PATH = "anime_data.db"
+DB_PATH = ANIME_DATA_DB_PATH
 FUZZY_THRESHOLD = 82  # min score to accept a match (0–100)
 
 # ── Alias map: common fan-name → MAL ID (for titles fuzzy can't reliably match) ─

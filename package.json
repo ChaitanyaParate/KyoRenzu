@@ -1,0 +1,59 @@
+{
+  "name": "kyorenzu",
+  "version": "1.0.0",
+  "description": "A lightweight personal anime library manager and recommendation engine.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:react": "cd web && npm run build",
+    "build:python": "pyinstaller --onefile api.py --distpath dist/api",
+    "build:electron": "electron-builder --linux",
+    "build": "npm run build:react && npm run build:python && npm run build:electron"
+  },
+  "build": {
+    "appId": "com.chaitanya004.kyorenzu",
+    "productName": "KyoRenzu",
+    "directories": {
+      "output": "dist/electron",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "package.json",
+      "logo.png",
+      "web/dist/**/*"
+    ],
+    "linux": {
+      "target": ["AppImage"],
+      "icon": "logo.png"
+    },
+    "extraResources": [
+      {
+        "from": "dist/api/api",
+        "to": "api/api"
+      },
+      {
+        "from": "user_library.db",
+        "to": "user_library.db"
+      },
+      {
+        "from": "embedding_index.json",
+        "to": "embedding_index.json"
+      },
+      {
+        "from": "synopsis_index.json",
+        "to": "synopsis_index.json"
+      },
+      {
+        "from": "ani-cli-master",
+        "to": "ani-cli-master"
+      }
+    ]
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5",
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3",
+    "wait-on": "^9.1.0"
+  }
+}

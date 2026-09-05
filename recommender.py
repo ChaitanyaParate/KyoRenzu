@@ -13,6 +13,7 @@ import os
 import json
 import math
 import sqlite3
+from config import *
 import numpy as np
 import torch
 from PIL import Image
@@ -22,19 +23,19 @@ from typing import NamedTuple
 from input_parser import AnimeEntry
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DB_PATH = "anime_data.db"
-EMBEDDINGS_PATH = "cover_embeddings.npy"
-INDEX_PATH = "embedding_index.json"
-GENRE_CORR_PATH = "genre_correlation.json"  # cached co-occurrence table
+DB_PATH = ANIME_DATA_DB_PATH
+EMBEDDINGS_PATH = COVER_EMBEDDINGS_PATH
+INDEX_PATH = EMBEDDING_INDEX_PATH
+GENRE_CORR_PATH = GENRE_CORRELATION_PATH  # cached co-occurrence table
 # Local model path — download once with: python download_model.py
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "clip-vit-large-patch14")
+MODEL_PATH = get_resource_path("models/clip-vit-large-patch14")
 
-SYNOPSIS_EMBEDDINGS_PATH = "synopsis_embeddings.npy"
-SYNOPSIS_INDEX_PATH = "synopsis_index.json"
+SYNOPSIS_EMBEDDINGS_PATH = SYNOPSIS_EMBEDDINGS_PATH
+SYNOPSIS_INDEX_PATH = SYNOPSIS_INDEX_PATH
 SYNOPSIS_MODEL_NAME = "all-MiniLM-L6-v2"
 
-AUDIO_EMBEDDINGS_PATH = "themes/audio_embeddings.npy"
-AUDIO_INDEX_PATH = "themes/audio_index.json"
+AUDIO_EMBEDDINGS_PATH = get_resource_path("themes/audio_embeddings.npy")
+AUDIO_INDEX_PATH = get_resource_path("themes/audio_index.json")
 AUDIO_MODEL_NAME = "laion/clap-htsat-unfused"
 
 # Blending weights

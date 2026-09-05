@@ -24,6 +24,7 @@ __pycache__/
 *.py[cod]
 
 # ── Frontend environment ──────────────────────────────────────────────────────
+node_modules/
 web/node_modules/
 web/dist/
 .env.local
@@ -52,6 +53,12 @@ Thumbs.db
 *.key
 # User anime lists (personal data — commit your own copy intentionally)
 Ani.csv
+Ani.xlsx - Movie.csv
+anime_data_before.db
+db_status_before.txt
+library_export.csv
+library_export.xml
+logo.png
 
 covers.zip
 *.npy

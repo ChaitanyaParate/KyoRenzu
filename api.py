@@ -1,5 +1,5 @@
 import traceback
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import Response
 import csv
 import xml.etree.ElementTree as ET
@@ -11,6 +11,7 @@ from typing import Optional, List
 import os
 import uvicorn
 import sqlite3
+from config import *
 import httpx
 import json
 import time
@@ -20,6 +21,13 @@ import asyncio
 import subprocess
 from bs4 import BeautifulSoup
 import urllib.parse
+import gdown
+import zipfile
+import shutil
+
+CURL_EXE = "curl_chrome116" if shutil.which("curl_chrome116") else "curl"
+import threading
+import sys
 
 from input_parser import auto_parse, get_all_raw_titles, _resolve_by_ids, _load_title_map, AnimeEntry
 from preference_encoder import EncodedPreference
@@ -37,8 +45,79 @@ logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
 app = FastAPI(title="KyōRenzu - API")
 
+DATASET_STATUS = {
+    "state": "checking", # 'ready', 'missing', 'downloading', 'error'
+    "progress": 0,
+    "message": "Checking datasets..."
+}
+
+def check_dataset_status():
+    required_files = [ANIME_DATA_DB_PATH, COVER_EMBEDDINGS_PATH, SYNOPSIS_EMBEDDINGS_PATH]
+    missing = [f for f in required_files if not os.path.exists(f)]
+    if missing or not os.path.exists(COVERS_DIR) or len(os.listdir(COVERS_DIR)) < 100:
+        DATASET_STATUS["state"] = "missing"
+        DATASET_STATUS["message"] = "Core dataset files are missing. Please download the dataset."
+    else:
+        DATASET_STATUS["state"] = "ready"
+        DATASET_STATUS["message"] = "Ready."
+
+check_dataset_status()
+
+def _download_dataset_thread():
+    DATASET_STATUS["state"] = "downloading"
+    
+    files_to_download = [
+        ("1gvDU8N6zlllGrVK5xgSV22CSPeq5xeaT", ANIME_DATA_DB_PATH, "anime_data.db"),
+        ("1E7Mw9rwelWwTLnQPWeekNHx8ppnkBpHq", COVER_EMBEDDINGS_PATH, "cover_embeddings.npy"),
+        ("1x7yhpGhaiRlJksSmeHZ8u4DKFEGBP4oW", SYNOPSIS_EMBEDDINGS_PATH, "synopsis_embeddings.npy")
+    ]
+    covers_zip_path = os.path.join(APP_DATA_DIR, "covers.zip")
+    files_to_download.append(("13b6bWJVhjUF_ILPjRIJfpvgyjBF53o-d", covers_zip_path, "covers.zip"))
+    
+    try:
+        total_files = len(files_to_download)
+        for idx, (file_id, dest_path, name) in enumerate(files_to_download):
+            DATASET_STATUS["message"] = f"Downloading {name} ({idx+1}/{total_files})..."
+            DATASET_STATUS["progress"] = int((idx / (total_files + 1)) * 100)
+            
+            # gdown auto downloads the file if we provide the id
+            gdown.download(id=file_id, output=dest_path, quiet=False)
+            
+        DATASET_STATUS["message"] = "Extracting covers.zip (this may take a few minutes)..."
+        DATASET_STATUS["progress"] = 90
+        
+        with zipfile.ZipFile(covers_zip_path, 'r') as zip_ref:
+            zip_ref.extractall(APP_DATA_DIR)
+            
+        os.remove(covers_zip_path)
+        
+        DATASET_STATUS["state"] = "ready"
+        DATASET_STATUS["progress"] = 100
+        DATASET_STATUS["message"] = "Dataset successfully installed! Restarting backend..."
+        
+        # We need to restart to load the .npy files, but since the frontend polls, we can just exit
+        # The electron wrapper will see it exited and if they reopen it works.
+        # But wait, we can just load them dynamically!
+        # For simplicity, telling the user to restart the app is fine. Or sys.exit(0) triggers the electron app to close.
+        # Let's just let it be ready.
+    except Exception as e:
+        DATASET_STATUS["state"] = "error"
+        DATASET_STATUS["message"] = f"Download failed: {e}"
+
+@app.get("/api/system/status")
+async def get_system_status():
+    return DATASET_STATUS
+
+@app.post("/api/system/download")
+async def start_download():
+    if DATASET_STATUS["state"] in ["downloading", "ready"]:
+        return {"status": "already_running_or_ready"}
+    t = threading.Thread(target=_download_dataset_thread)
+    t.start()
+    return {"status": "started"}
+
 def init_db():
-    with sqlite3.connect("user_library.db") as conn:
+    with sqlite3.connect(USER_LIBRARY_DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS user_library (
                 mal_id INTEGER PRIMARY KEY,
@@ -69,7 +148,7 @@ def init_db():
 async def notification_worker():
     while True:
         try:
-            with sqlite3.connect("user_library.db") as conn:
+            with sqlite3.connect(USER_LIBRARY_DB_PATH) as conn:
                 conn.row_factory = sqlite3.Row
                 watching = conn.execute("SELECT mal_id, episodes_watched FROM user_library WHERE status = 'Watching'").fetchall()
             
@@ -95,7 +174,7 @@ async def notification_worker():
                     resp = await client.post("https://graphql.anilist.co", json={"query": query, "variables": {"in": mal_ids}})
                     if resp.status_code == 200:
                         media_list = resp.json().get('data', {}).get('Page', {}).get('media', [])
-                        with sqlite3.connect("user_library.db") as conn:
+                        with sqlite3.connect(USER_LIBRARY_DB_PATH) as conn:
                             for media in media_list:
                                 mal_id = media.get('idMal')
                                 title = media.get('title', {}).get('english') or media.get('title', {}).get('romaji')
@@ -152,7 +231,7 @@ async def get_recommendations(req: RecommendRequest):
         # Parse liked anime
         liked_anime = []
         if req.use_library:
-            with sqlite3.connect("user_library.db") as udb:
+            with sqlite3.connect(USER_LIBRARY_DB_PATH) as udb:
                 udb_cursor = udb.cursor()
                 udb_cursor.execute("SELECT mal_id, score FROM user_library WHERE status IN ('Completed', 'Watching')")
                 library_items = udb_cursor.fetchall()
@@ -161,7 +240,7 @@ async def get_recommendations(req: RecommendRequest):
                 mal_ids = [item[0] for item in library_items]
                 library_scores = {item[0]: float(item[1] or 0) for item in library_items}
                 
-                with sqlite3.connect("anime_data.db") as adb:
+                with sqlite3.connect(ANIME_DATA_DB_PATH) as adb:
                     adb.row_factory = sqlite3.Row
                     adb_cursor = adb.cursor()
                     adb_cursor.execute(f"SELECT mal_id, title_english, title, genres, score, local_image_path FROM anime WHERE mal_id IN ({','.join(map(str, mal_ids))})")
@@ -251,7 +330,7 @@ async def get_recommendations(req: RecommendRequest):
             
         # Format results for frontend
         output = []
-        with sqlite3.connect("anime_data.db") as conn:
+        with sqlite3.connect(ANIME_DATA_DB_PATH) as conn:
             for i, r in enumerate(results):
                 # Convert local_image_path to something the frontend can fetch
                 # We will serve the 'covers' directory statically
@@ -291,7 +370,7 @@ async def get_recommendations(req: RecommendRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 def get_library_sqlite():
-    conn = sqlite3.connect('anime_data.db')
+    conn = sqlite3.connect(ANIME_DATA_DB_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     
@@ -362,7 +441,7 @@ def upsert_anime_to_db(item: dict, cover_url: str, synopsis: str):
     status = item.get('status')
     
     try:
-        conn = sqlite3.connect('anime_data.db')
+        conn = sqlite3.connect(ANIME_DATA_DB_PATH)
         c = conn.cursor()
         c.execute("""
             INSERT INTO anime (
@@ -384,7 +463,7 @@ def upsert_anime_to_db(item: dict, cover_url: str, synopsis: str):
         print(f"Failed to dynamic upsert {title}: {e}")
 
 def get_local_data_for_mal_id(mal_id: int):
-    conn = sqlite3.connect('anime_data.db')
+    conn = sqlite3.connect(ANIME_DATA_DB_PATH)
     c = conn.cursor()
     c.execute("SELECT local_image_path, theme_local_path, episodes, members FROM anime WHERE mal_id = ?", (mal_id,))
     row = c.fetchone()
@@ -393,8 +472,26 @@ def get_local_data_for_mal_id(mal_id: int):
         return row[0], row[1], row[2], row[3]
     return None, None, None, None
 
+async def download_and_save_cover(mal_id: int, url: str):
+    if not url: return
+    local_path = os.path.join(COVERS_DIR, f"{mal_id}.jpg")
+    if os.path.exists(local_path): return
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, timeout=10.0)
+            if resp.status_code == 200:
+                with open(local_path, 'wb') as f:
+                    f.write(resp.content)
+                # update local_image_path in db
+                conn = sqlite3.connect(ANIME_DATA_DB_PATH)
+                conn.execute("UPDATE anime SET local_image_path = ? WHERE mal_id = ?", (local_path, mal_id))
+                conn.commit()
+                conn.close()
+    except Exception as e:
+        print(f"Failed to download cover for {mal_id}: {e}")
+
 @app.get("/api/library")
-async def get_library():
+async def get_library(background_tasks: BackgroundTasks):
     global _LIBRARY_CACHE, _LIBRARY_CACHE_TIME
     try:
         # Check cache (1 hour)
@@ -446,6 +543,9 @@ async def get_library():
                     local_image, local_theme, local_episodes, local_members = get_local_data_for_mal_id(mal_id)
                     cover_url = f"http://localhost:8000/covers/{os.path.basename(local_image)}" if local_image else item.get('coverImage', {}).get('extraLarge')
                     theme_url = f"http://localhost:8000/themes/{os.path.basename(local_theme)}" if local_theme else None
+                    
+                    if not local_image and item.get('coverImage', {}).get('extraLarge'):
+                        background_tasks.add_task(download_and_save_cover, mal_id, item.get('coverImage', {}).get('extraLarge'))
                     
                     synopsis = (item.get('description') or "").replace("<br>", "").replace("<i>", "").replace("</i>", "")
                     
@@ -503,6 +603,9 @@ async def get_library():
                         cover_url = f"http://localhost:8000/covers/{os.path.basename(local_image)}" if local_image else item.get('coverImage', {}).get('extraLarge')
                         theme_url = f"http://localhost:8000/themes/{os.path.basename(local_theme)}" if local_theme else None
                         
+                        if not local_image and item.get('coverImage', {}).get('extraLarge'):
+                            background_tasks.add_task(download_and_save_cover, mal_id, item.get('coverImage', {}).get('extraLarge'))
+                        
                         synopsis = (item.get('description') or "").replace("<br>", "").replace("<i>", "").replace("</i>", "")
                         
                         anime_list.append({
@@ -537,7 +640,7 @@ async def get_library():
                 "categories": library_data
             }
             
-            with open('library_cache.json', 'w') as f:
+            with open(LIBRARY_CACHE_PATH, 'w') as f:
                 json.dump(result, f)
                 
             _LIBRARY_CACHE = result
@@ -546,8 +649,8 @@ async def get_library():
             
         except Exception as api_e:
             print(f"AniList API failed: {api_e}.")
-            if os.path.exists('library_cache.json'):
-                with open('library_cache.json', 'r') as f:
+            if os.path.exists(LIBRARY_CACHE_PATH):
+                with open(LIBRARY_CACHE_PATH, 'r') as f:
                     _LIBRARY_CACHE = json.load(f)
                 _LIBRARY_CACHE_TIME = time.time()
                 return _LIBRARY_CACHE
@@ -558,8 +661,8 @@ async def get_library():
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-if os.path.exists("covers"):
-    app.mount("/covers", StaticFiles(directory="covers"), name="covers")
+if os.path.exists(COVERS_DIR):
+    app.mount("/covers", StaticFiles(directory=COVERS_DIR), name="covers")
 
 if os.path.exists("themes"):
     app.mount("/themes", StaticFiles(directory="themes"), name="themes")
@@ -575,7 +678,7 @@ class UserLibraryUpdate(BaseModel):
 @app.delete("/api/user_library/{mal_id}")
 async def delete_user_library_item(mal_id: int):
     try:
-        with sqlite3.connect("user_library.db") as conn:
+        with sqlite3.connect(USER_LIBRARY_DB_PATH) as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM user_library WHERE mal_id = ?", (mal_id,))
             if cursor.rowcount == 0:
@@ -587,7 +690,7 @@ async def delete_user_library_item(mal_id: int):
 
 @app.get("/api/anime/{mal_id}")
 def get_anime_details(mal_id: int):
-    conn = sqlite3.connect("anime_data.db")
+    conn = sqlite3.connect(ANIME_DATA_DB_PATH)
     conn.row_factory = sqlite3.Row
     anime = conn.execute('SELECT * FROM anime WHERE mal_id = ?', (mal_id,)).fetchone()
     conn.close()
@@ -602,7 +705,7 @@ def get_anime_details(mal_id: int):
 
 @app.get("/api/random")
 def get_random_anime():
-    conn = sqlite3.connect("anime_data.db")
+    conn = sqlite3.connect(ANIME_DATA_DB_PATH)
     conn.row_factory = sqlite3.Row
     anime = conn.execute('SELECT * FROM anime ORDER BY RANDOM() LIMIT 1').fetchone()
     conn.close()
@@ -618,10 +721,10 @@ def get_random_anime():
 @app.get("/api/user_library")
 async def get_user_library():
     try:
-        with sqlite3.connect("user_library.db") as conn:
+        with sqlite3.connect(USER_LIBRARY_DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("ATTACH DATABASE 'anime_data.db' AS anime_db")
+            cursor.execute(f"ATTACH DATABASE '{ANIME_DATA_DB_PATH}' AS anime_db")
             cursor.execute("""
                 SELECT 
                     u.mal_id, u.status, u.episodes_watched, u.score, u.updated_at, u.notes,
@@ -648,13 +751,13 @@ async def get_user_library():
 @app.post("/api/user_library")
 async def update_user_library(update: UserLibraryUpdate):
     try:
-        with sqlite3.connect("user_library.db") as conn:
+        with sqlite3.connect(USER_LIBRARY_DB_PATH) as conn:
             cursor = conn.cursor()
             
             # Fetch title if missing
             title = update.anime_title
             if not title:
-                with sqlite3.connect("anime_data.db") as conn2:
+                with sqlite3.connect(ANIME_DATA_DB_PATH) as conn2:
                     c2 = conn2.cursor()
                     c2.execute("SELECT title_english, title FROM anime WHERE mal_id = ?", (update.mal_id,))
                     row2 = c2.fetchone()
@@ -698,7 +801,7 @@ async def update_user_library(update: UserLibraryUpdate):
 @app.delete("/api/user_library/{mal_id}")
 async def delete_user_library(mal_id: int):
     try:
-        with sqlite3.connect("user_library.db") as conn:
+        with sqlite3.connect(USER_LIBRARY_DB_PATH) as conn:
             conn.execute("DELETE FROM user_library WHERE mal_id = ?", (mal_id,))
             conn.commit()
             return {"status": "success"}
@@ -708,7 +811,7 @@ async def delete_user_library(mal_id: int):
 @app.get("/api/library/export")
 async def export_user_library(format: str = "xml"):
     try:
-        with sqlite3.connect("user_library.db") as conn:
+        with sqlite3.connect(USER_LIBRARY_DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("""
@@ -718,7 +821,7 @@ async def export_user_library(format: str = "xml"):
             rows = cursor.fetchall()
 
         # Fetch titles for the XML from anime_data.db
-        with sqlite3.connect("anime_data.db") as conn2:
+        with sqlite3.connect(ANIME_DATA_DB_PATH) as conn2:
             conn2.row_factory = sqlite3.Row
             cursor2 = conn2.cursor()
             anime_info = {}
@@ -808,7 +911,7 @@ async def import_user_library(file: UploadFile = File(...), overwrite: bool = Fo
             text = content.decode("utf-8")
             reader = csv.DictReader(io.StringIO(text))
             
-            with sqlite3.connect("anime_data.db") as adb:
+            with sqlite3.connect(ANIME_DATA_DB_PATH) as adb:
                 adb_cursor = adb.cursor()
                 for row in reader:
                     mal_id = 0
@@ -913,7 +1016,7 @@ async def import_user_library(file: UploadFile = File(...), overwrite: bool = Fo
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format")
 
-        with sqlite3.connect("user_library.db") as conn:
+        with sqlite3.connect(USER_LIBRARY_DB_PATH) as conn:
             cursor = conn.cursor()
             if overwrite:
                 cursor.execute("DELETE FROM user_library")
@@ -953,7 +1056,7 @@ async def search_anime(
     limit: int = 30
 ):
     try:
-        with sqlite3.connect("anime_data.db") as conn:
+        with sqlite3.connect(ANIME_DATA_DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
@@ -1096,7 +1199,7 @@ async def get_recommendations(mal_id: int):
         
         # Format results
         results = []
-        with sqlite3.connect("anime_data.db") as conn:
+        with sqlite3.connect(ANIME_DATA_DB_PATH) as conn:
             for r in recs:
                 # Skip the anime itself if it appears
                 if r.mal_id == mal_id:
@@ -1159,7 +1262,7 @@ async def play_episode(title: str, episode: int, alt_title: str = None, dub: boo
             search_url = f"https://anidb.app/browse?q={search_query}"
             
             curl_proc = await asyncio.create_subprocess_exec(
-                "curl_chrome116", "-sL", 
+                CURL_EXE, "-sL", 
                 search_url,
                 env=env,
                 stdout=asyncio.subprocess.PIPE
@@ -1180,7 +1283,7 @@ async def play_episode(title: str, episode: int, alt_title: str = None, dub: boo
                     search_query = alt_title.replace(' ', '+')
                     search_url = f"https://anidb.app/browse?q={search_query}"
                     curl_proc = await asyncio.create_subprocess_exec(
-                        "curl_chrome116", "-sL", search_url, env=env, stdout=asyncio.subprocess.PIPE
+                        CURL_EXE, "-sL", search_url, env=env, stdout=asyncio.subprocess.PIPE
                     )
                     try:
                         stdout, _ = await asyncio.wait_for(curl_proc.communicate(), timeout=15.0)
@@ -1215,12 +1318,14 @@ async def play_episode(title: str, episode: int, alt_title: str = None, dub: boo
             print(f"Pre-search validation failed: {e}")
 
         # Execute ani-cli with the validated selection index and the search string that matched
-        cmd = ["./ani-cli-master/ani-cli", active_search_title, "-q", quality, "-S", str(selection_index), "-e", str(episode), "--exit-after-play"]
+        ani_cli_path = get_resource_path(os.path.join("ani-cli-master", "ani-cli"))
+        cmd = [ani_cli_path, active_search_title, "-q", quality, "-S", str(selection_index), "-e", str(episode), "--exit-after-play"]
         if dub:
             cmd.append("--dub")
         
         env = os.environ.copy()
         env["PATH"] = f"{os.path.expanduser('~')}/.local/bin:" + env.get("PATH", "")
+        env["ANI_CLI_MENU"] = "cat" # Bypass fzf dependency check since we use -S non-interactively
         # Run process asynchronously so we don't block the API
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -1267,9 +1372,9 @@ async def play_episode(title: str, episode: int, alt_title: str = None, dub: boo
 @app.get("/api/notifications")
 async def get_notifications():
     try:
-        with sqlite3.connect("user_library.db") as conn:
+        with sqlite3.connect(USER_LIBRARY_DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
-            conn.execute("ATTACH DATABASE 'anime_data.db' AS anime_db")
+            conn.execute(f"ATTACH DATABASE '{ANIME_DATA_DB_PATH}' AS anime_db")
             rows = conn.execute("""
                 SELECT n.*, a.title_english, a.genres, a.episodes as total_episodes, a.season, a.year, a.image_url, a.local_image_path, a.synopsis, a.score as global_score
                 FROM notifications n
@@ -1297,7 +1402,7 @@ class ReadNotificationRequest(BaseModel):
 @app.post("/api/notifications/read")
 async def mark_notifications_read(req: ReadNotificationRequest):
     try:
-        with sqlite3.connect("user_library.db") as conn:
+        with sqlite3.connect(USER_LIBRARY_DB_PATH) as conn:
             for nid in req.notification_ids:
                 conn.execute("UPDATE notifications SET is_read = 1 WHERE id = ?", (nid,))
             conn.commit()
@@ -1328,4 +1433,4 @@ async def get_episodes_web_search(title: str):
         return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

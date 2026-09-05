@@ -95,6 +95,7 @@ function fuzzyMatchTitle(query: string, title1?: string | null, title2?: string 
 function App() {
   const [activeTab, setActiveTab] = useState('home')
   const [isSidebarExpanded, setIsSidebarExpanded] = useState(false)
+  const [userName, setUserName] = useState<string>(localStorage.getItem('kyorenzu_username') || '')
   const [episodePage, setEpisodePage] = useState(0)
 
   // Notifications State
@@ -326,25 +327,51 @@ function App() {
   const [discoverLoading, setDiscoverLoading] = useState(false)
   const [results, setResults] = useState<AnimeRecommendation[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [systemStatus, setSystemStatus] = useState<{state: string, progress: number, message: string} | null>(null);
   
   useEffect(() => {
-    // Fetch Library Data
-    const fetchLibrary = async () => {
+    let mounted = true;
+    let retryTimeout: NodeJS.Timeout;
+
+    // Fetch System Status First
+    const fetchStatusAndLibrary = async () => {
       try {
+        const sysRes = await fetch('http://localhost:8000/api/system/status')
+        if (!sysRes.ok) throw new Error("Server not ready");
+        
+        const sysData = await sysRes.json()
+        if (mounted) setSystemStatus(sysData)
+        
+        if (sysData.state !== 'ready') {
+          // Keep polling status every 1s
+          if (mounted) retryTimeout = setTimeout(fetchStatusAndLibrary, 1000)
+          return
+        }
+
+        // If ready, fetch library normally
         const response = await fetch('http://localhost:8000/api/library')
+        if (!response.ok) throw new Error("Library fetch failed");
+        
         const data = await response.json()
-        if (data.status === 'success') {
+        if (data.status === 'success' && mounted) {
           setHeroAnimes(data.heroAnimes || [])
           setCategories(data.categories || [])
+          setLibraryLoading(false)
         }
       } catch (err) {
-        console.error("Failed to load library:", err)
-      } finally {
-        setLibraryLoading(false)
+        console.warn("Backend not ready, retrying in 2s...", err)
+        if (mounted) {
+          retryTimeout = setTimeout(fetchStatusAndLibrary, 2000)
+        }
       }
     }
     
-    fetchLibrary()
+    fetchStatusAndLibrary()
+
+    return () => {
+      mounted = false;
+      clearTimeout(retryTimeout);
+    }
   }, [])
 
   // Auto-rotate hero banner
@@ -682,6 +709,39 @@ function App() {
       </div>
     );
   };
+
+  if (systemStatus && systemStatus.state !== 'ready') {
+    return (
+      <div className="app-container" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: 'var(--bg-dark)', padding: '2rem', textAlign: 'center' }}>
+        <h1 style={{ fontSize: '3rem', marginBottom: '1rem', color: 'var(--text-light)' }}>KyoRenzu Initial Setup</h1>
+        <p style={{ fontSize: '1.2rem', color: 'var(--text-muted)', maxWidth: '600px', marginBottom: '2rem' }}>
+          Welcome! Before you can use KyoRenzu's AI Discovery engine, we need to download the core dataset (anime database, cover images, and ML embeddings).
+        </p>
+        
+        {systemStatus.state === 'missing' && (
+          <button 
+            className="action-btn" 
+            style={{ fontSize: '1.2rem', padding: '1rem 2rem' }}
+            onClick={() => fetch('http://localhost:8000/api/system/download', {method: 'POST'})}
+          >
+            Download Dataset (2.6GB)
+          </button>
+        )}
+        
+        {(systemStatus.state === 'downloading' || systemStatus.state === 'error') && (
+          <div style={{ width: '100%', maxWidth: '600px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', color: 'var(--text-light)' }}>
+              <span>{systemStatus.message}</span>
+              <span>{systemStatus.progress}%</span>
+            </div>
+            <div style={{ width: '100%', height: '8px', background: 'var(--bg-card)', borderRadius: '4px', overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${systemStatus.progress}%`, background: systemStatus.state === 'error' ? '#ef4444' : 'var(--accent-primary)', transition: 'width 0.3s ease' }} />
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className="app-container">
@@ -1158,10 +1218,10 @@ function App() {
             {/* Profile Header */}
             <div className="profile-header">
               <div className="profile-avatar">
-                <img src="https://ui-avatars.com/api/?name=Chaitanya004&background=2b2d31&color=fff&size=100" alt="Chaitanya004" />
+                <img src={`https://ui-avatars.com/api/?name=${userName || 'Guest'}&background=2b2d31&color=fff&size=100`} alt={userName || 'Guest'} />
               </div>
               <div className="profile-info">
-                <h1 className="profile-name">Chaitanya004</h1>
+                <h1 className="profile-name">{userName || 'Guest'}</h1>
                 <span className="profile-rank">
                   {userLibrary.filter(item => item.status === 'Completed').length < 10 ? 'Newbie' :
                    userLibrary.filter(item => item.status === 'Completed').length < 50 ? 'Casual Watcher' :
@@ -2154,6 +2214,35 @@ function App() {
       )}
 
       {renderStatsModal()}
+
+      {!userName && systemStatus?.state === 'ready' && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ width: '400px', textAlign: 'center', padding: '32px', background: 'var(--bg-dark)' }}>
+            <h2 style={{ marginBottom: '12px' }}>Welcome to KyoRenzu!</h2>
+            <p style={{ color: 'var(--text-muted)', marginBottom: '24px' }}>Please enter your username to personalize your profile.</p>
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              const fd = new FormData(e.currentTarget);
+              const name = fd.get('username') as string;
+              if (name && name.trim()) {
+                setUserName(name.trim());
+                localStorage.setItem('kyorenzu_username', name.trim());
+              } else {
+                setUserName('Guest');
+                localStorage.setItem('kyorenzu_username', 'Guest');
+              }
+            }}>
+              <input 
+                name="username"
+                autoFocus
+                placeholder="e.g. AnimeFan99"
+                style={{ width: '100%', padding: '12px', background: 'var(--bg-card)', border: '1px solid var(--border-color)', borderRadius: '8px', color: 'white', marginBottom: '16px' }}
+              />
+              <button type="submit" className="btn-primary" style={{ width: '100%', padding: '12px' }}>Continue</button>
+            </form>
+          </div>
+        </div>
+      )}
 
     </div>
   )
