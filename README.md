@@ -44,6 +44,8 @@ Our flagship AI engine can find anime that *looks like Death Note* but has *a re
 KyoRenzu is packaged as a **lightweight OTA AppImage**. 
 The application will automatically download all heavy datasets (the 30k+ SQLite DB, ML embeddings, and 2.5GB of covers) from Google Drive on your very first launch.
 
+**[Download the AppImage from Google Drive here](https://drive.google.com/file/d/1-dy0lPvo-CVuTsfmgpyaIXXCQ4HDCb-x/view?usp=sharing)**
+
 ```bash
 # Example if downloading from releases:
 chmod +x KyoRenzu-1.0.0.AppImage
@@ -101,6 +103,13 @@ npm run build
 - Click **"Play Now"** or an episode number in the episode grid.
 - Watch your terminal! `api.py` will invoke the local `ani-cli` submodule, search the web, bypass captchas, and seamlessly launch the stream in your native `mpv` player in full 1080p without ads!
 
+### Standalone ML Recommendation GUI
+If you prefer to focus solely on the AI recommendation engine without the full streaming platform, you can use the built-in Gradio interface:
+```bash
+python gui.py
+```
+Then open `http://localhost:7860` in your browser. This lets you input your watchlist (via text or CSV) and get multimodal recommendations instantly.
+
 ---
 
 ## 🛠️ API & Architecture
@@ -126,10 +135,13 @@ This spawns an async `multiprocessing` pipeline that manages rate limits, resolv
 
 ```
 KyoRenzu/
+├── main.js & package.json    ← Electron desktop application wrapper
 ├── api.py                    ← FastAPI backend & playback controller
+├── gui.py                    ← Standalone Gradio Web GUI for the ML recommender
 ├── web/                      ← React/Vite frontend
 ├── mal_scraper.py            ← Async metadata enricher
 ├── recommender.py            ← ML similarity & ranking logic
+├── embed_*.py                ← Scripts for generating ML embeddings (covers, synopsis, audio)
 ├── anime_data.db             ← 30k+ local anime database
 ├── covers/                   ← Downloaded JPEG cover art
 └── ani-cli-master/           ← INCLUDED SUBMODULE: Native bash tool for anime streaming
