@@ -44,7 +44,7 @@ Our flagship AI engine can find anime that *looks like Death Note* but has *a re
 KyoRenzu is packaged as a **lightweight OTA AppImage**. 
 The application will automatically download all heavy datasets (the 30k+ SQLite DB, ML embeddings, and 2.5GB of covers) from Google Drive on your very first launch.
 
-**[Download the AppImage from Google Drive here](https://drive.google.com/file/d/1-dy0lPvo-CVuTsfmgpyaIXXCQ4HDCb-x/view?usp=sharing)**
+**[Download the AppImage from Google Drive here](https://drive.google.com/file/d/1I6mmQyCkQ7HRMohfS2V4iLMOI1pUm4RH/view?usp=sharing)**
 
 ```bash
 # Example if downloading from releases:
