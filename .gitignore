@@ -35,6 +35,8 @@ dist/
 build/
 *.egg
 .eggs/
+*.AppImage
+*.appimage
 
 # ── Jupyter ───────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/

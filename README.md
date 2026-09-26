@@ -144,7 +144,8 @@ KyoRenzu/
 ├── embed_*.py                ← Scripts for generating ML embeddings (covers, synopsis, audio)
 ├── anime_data.db             ← 30k+ local anime database
 ├── covers/                   ← Downloaded JPEG cover art
-└── ani-cli-master/           ← INCLUDED SUBMODULE: Native bash tool for anime streaming
+├── ani-cli-master/           ← INCLUDED SUBMODULE: Native bash tool for anime streaming
+└── auto_selector.py          ← Custom headless menu handler for ani-cli automation
 ```
 
 ---

@@ -2217,7 +2217,7 @@ function App() {
 
       {!userName && systemStatus?.state === 'ready' && (
         <div className="modal-overlay">
-          <div className="modal-content" style={{ width: '400px', textAlign: 'center', padding: '32px', background: 'var(--bg-dark)' }}>
+          <div className="modal-content" style={{ width: '400px', height: 'auto', aspectRatio: 'auto', overflow: 'visible', textAlign: 'center', padding: '32px', background: 'var(--bg-dark)' }}>
             <h2 style={{ marginBottom: '12px' }}>Welcome to KyoRenzu!</h2>
             <p style={{ color: 'var(--text-muted)', marginBottom: '24px' }}>Please enter your username to personalize your profile.</p>
             <form onSubmit={(e) => {

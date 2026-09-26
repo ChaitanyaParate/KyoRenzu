@@ -1246,86 +1246,23 @@ async def play_episode(title: str, episode: int, alt_title: str = None, dub: boo
         if provider == "anikoto":
             raise HTTPException(status_code=501, detail="Anikoto scraper is under construction. Please use Anidb.")
 
-        # Pre-search logic to prevent wrong video playback
-        import urllib.parse
-        import difflib
-        import re
-        
-        env = os.environ.copy()
-        env["PATH"] = f"{os.path.expanduser('~')}/.local/bin:" + env.get("PATH", "")
-        
-        selection_index = 1
-        active_search_title = title
-        try:
-            # We'll search using the English title by default since Anidb is heavily English-indexed
-            search_query = title.replace(' ', '+')
-            search_url = f"https://anidb.app/browse?q={search_query}"
-            
-            curl_proc = await asyncio.create_subprocess_exec(
-                CURL_EXE, "-sL", 
-                search_url,
-                env=env,
-                stdout=asyncio.subprocess.PIPE
-            )
-            try:
-                stdout, _ = await asyncio.wait_for(curl_proc.communicate(), timeout=15.0)
-            except asyncio.TimeoutError:
-                curl_proc.kill()
-                raise HTTPException(status_code=504, detail="Pre-search validation timed out on Anidb.")
-                
-            html = stdout.decode('utf-8', errors='ignore').replace('\n', ' ')
-            
-            matches = re.findall(r'anime/[a-z0-9-]+-[0-9]+".*?alt="([^"]+)"', html)
-            if not matches:
-                # Fallback: Try searching with alt_title if initial search yields 0 results
-                if alt_title:
-                    active_search_title = alt_title
-                    search_query = alt_title.replace(' ', '+')
-                    search_url = f"https://anidb.app/browse?q={search_query}"
-                    curl_proc = await asyncio.create_subprocess_exec(
-                        CURL_EXE, "-sL", search_url, env=env, stdout=asyncio.subprocess.PIPE
-                    )
-                    try:
-                        stdout, _ = await asyncio.wait_for(curl_proc.communicate(), timeout=15.0)
-                    except asyncio.TimeoutError:
-                        curl_proc.kill()
-                        raise HTTPException(status_code=504, detail="Pre-search validation timed out on Anidb.")
-                    html = stdout.decode('utf-8', errors='ignore').replace('\n', ' ')
-                    matches = re.findall(r'anime/[a-z0-9-]+-[0-9]+".*?alt="([^"]+)"', html)
-                    
-                if not matches:
-                    raise HTTPException(status_code=404, detail=f"Anime '{title}' not found on Anidb (0 search results).")
-                
-            best_idx = 1
-            best_ratio = 0
-            best_title = ""
-            for i, anidb_title in enumerate(matches):
-                clean_title = anidb_title.replace('&#039;', "'").replace('&quot;', '"').replace('&amp;', '&')
-                ratio1 = difflib.SequenceMatcher(None, title.lower(), clean_title.lower()).ratio()
-                ratio2 = difflib.SequenceMatcher(None, alt_title.lower(), clean_title.lower()).ratio() if alt_title else 0
-                ratio = max(ratio1, ratio2)
-                if ratio > best_ratio:
-                    best_ratio = ratio
-                    best_idx = i + 1
-                    best_title = clean_title
-            
-            if best_ratio < 0.6:
-                raise HTTPException(status_code=404, detail=f"Anime '{title}' not found. Closest match was '{best_title}' ({best_ratio:.0%} similarity).")
-            selection_index = best_idx
-        except HTTPException:
-            raise
-        except Exception as e:
-            print(f"Pre-search validation failed: {e}")
+        import os
+        import asyncio
+        import subprocess
 
-        # Execute ani-cli with the validated selection index and the search string that matched
+        # Execute ani-cli with the auto selector
         ani_cli_path = get_resource_path(os.path.join("ani-cli-master", "ani-cli"))
-        cmd = [ani_cli_path, active_search_title, "-q", quality, "-S", str(selection_index), "-e", str(episode), "--exit-after-play"]
+        cmd = [ani_cli_path, title, "-q", quality, "-e", str(episode), "--exit-after-play"]
         if dub:
             cmd.append("--dub")
         
         env = os.environ.copy()
         env["PATH"] = f"{os.path.expanduser('~')}/.local/bin:" + env.get("PATH", "")
-        env["ANI_CLI_MENU"] = "cat" # Bypass fzf dependency check since we use -S non-interactively
+        auto_selector_path = get_resource_path("auto_selector.py")
+        env["ANI_CLI_MENU"] = "python3"
+        env["ANI_CLI_MENU_FLAGS"] = auto_selector_path
+        env["TARGET_ANIME_TITLE"] = title
+
         # Run process asynchronously so we don't block the API
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -1346,7 +1283,7 @@ async def play_episode(title: str, episode: int, alt_title: str = None, dub: boo
                     error_log.append(decoded_line)
                     
                     # If ani-cli successfully scraped and is launching mpv, it prints this:
-                    if "Playing episode" in decoded_line or "anidb.app links fetched" in decoded_line or "Downloading" in decoded_line:
+                    if "Playing episode" in decoded_line or "links fetched" in decoded_line or "Downloading" in decoded_line:
                         return {"status": "playing", "message": f"Launching player for {title} Episode {episode}"}
                         
         except asyncio.TimeoutError:

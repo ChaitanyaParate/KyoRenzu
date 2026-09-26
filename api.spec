@@ -5,7 +5,7 @@ a = Analysis(
     ['api.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('auto_selector.py', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
