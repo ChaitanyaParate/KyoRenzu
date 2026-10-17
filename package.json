@@ -6,7 +6,7 @@
   "scripts": {
     "start": "electron .",
     "build:react": "cd web && npm run build",
-    "build:python": "pyinstaller --onefile --add-data \"auto_selector.py:.\" api.py --distpath dist/api",
+    "build:python": "./venv/bin/pyinstaller api.spec --distpath dist/api",
     "build:electron": "electron-builder --linux",
     "build": "npm run build:react && npm run build:python && npm run build:electron"
   },

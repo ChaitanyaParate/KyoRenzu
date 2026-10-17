@@ -10,7 +10,7 @@ from rapidfuzz import process, fuzz
 from typing import NamedTuple
 import re
 import requests
-from config import ANIME_DATA_DB_PATH
+from config import ANIME_DATA_DB_PATH, get_db_connection
 
 DB_PATH = ANIME_DATA_DB_PATH
 FUZZY_THRESHOLD = 82  # min score to accept a match (0–100)
@@ -84,14 +84,13 @@ class AnimeEntry(NamedTuple):
 
 def _load_title_map() -> dict[int, dict]:
     """Load all anime titles from DB into a lookup dict."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        SELECT mal_id, title, title_english, title_japanese, genres, score, local_image_path
-        FROM anime
-    """)
-    rows = c.fetchall()
-    conn.close()
+    with get_db_connection(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT mal_id, title, title_english, title_japanese, genres, score, local_image_path
+            FROM anime
+        """)
+        rows = c.fetchall()
 
     title_map = {}
     for row in rows:
@@ -281,23 +280,48 @@ def _resolve_dataframe(df: pd.DataFrame) -> list[AnimeEntry]:
 
 
 def _resolve_by_ids(mal_ids: list[int]) -> list[AnimeEntry]:
-    title_map = _load_title_map()
+    if not mal_ids:
+        return []
     results = []
+    import recommender
+    anime_cache = recommender._load_anime_db()
+    unfound = []
     for mid in mal_ids:
-        if mid in title_map:
-            info = title_map[mid]
+        if anime_cache and mid in anime_cache:
+            info = anime_cache[mid]
             results.append(AnimeEntry(
                 mal_id=mid,
-                title=info["title"],
-                title_english=info["title_english"],
-                title_japanese=info["title_japanese"],
-                genres=info["genres"],
-                score=info["score"],
-                local_image_path=info["local_image_path"],
+                title=info.get("title", ""),
+                title_english=info.get("title_english", ""),
+                title_japanese=info.get("title_japanese", ""),
+                genres=info.get("genres", ""),
+                score=info.get("score"),
+                local_image_path=info.get("local_image_path"),
                 weight=1.0,
             ))
         else:
-            print(f"  [input_parser] WARNING: mal_id {mid} not found in DB.")
+            unfound.append(mid)
+
+    if unfound:
+        with get_db_connection(DB_PATH) as conn:
+            c = conn.cursor()
+            placeholders = ",".join("?" for _ in unfound)
+            c.execute(f"""
+                SELECT mal_id, title, title_english, title_japanese, genres, score, local_image_path
+                FROM anime WHERE mal_id IN ({placeholders})
+            """, unfound)
+            for row in c.fetchall():
+                mid, title, en, jp, gen, sc, img = row
+                results.append(AnimeEntry(
+                    mal_id=mid,
+                    title=title or "",
+                    title_english=en or "",
+                    title_japanese=jp or "",
+                    genres=gen or "",
+                    score=sc,
+                    local_image_path=img,
+                    weight=1.0,
+                ))
     return results
 
 

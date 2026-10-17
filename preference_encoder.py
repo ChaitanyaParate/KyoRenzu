@@ -223,17 +223,40 @@ _clip_model = None
 _clip_processor = None
 
 
+def get_safe_device() -> str:
+    if os.environ.get("FORCE_CPU") == "1":
+        return "cpu"
+    try:
+        import torch
+        if torch.cuda.is_available():
+            _ = torch.zeros(1, device="cuda")
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
 def _get_clip():
     global _clip_model, _clip_processor
     if _clip_model is None:
-        if not os.path.isdir(MODEL_PATH):
-            raise FileNotFoundError(
-                f"Local CLIP model not found at: {MODEL_PATH}\n"
-                f"Please run: python download_model.py"
-            )
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        _clip_model = CLIPModel.from_pretrained(MODEL_PATH, local_files_only=True).to(device)
-        _clip_processor = CLIPProcessor.from_pretrained(MODEL_PATH, local_files_only=True)
+        device = get_safe_device()
+        model_target = None
+        from config import DATA_DIR, BASE_DIR
+        candidate_paths = [
+            MODEL_PATH,
+            os.path.join(DATA_DIR, "models", "clip-vit-large-patch14"),
+            os.path.join(BASE_DIR, "models", "clip-vit-large-patch14"),
+        ]
+        for p in candidate_paths:
+            if p and os.path.isdir(p):
+                model_target = p
+                break
+
+        if model_target:
+            _clip_model = CLIPModel.from_pretrained(model_target, local_files_only=True).to(device)
+            _clip_processor = CLIPProcessor.from_pretrained(model_target, local_files_only=True)
+        else:
+            _clip_model = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(device)
+            _clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
         _clip_model.eval()
     return _clip_model, _clip_processor
 

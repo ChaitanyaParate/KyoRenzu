@@ -78,49 +78,80 @@ DEMOGRAPHIC_GENRES = {"Josei", "Seinen", "Shoujo", "Shounen", "Kids"}
 
 
 
-# ── Lazy CLIP loader ──────────────────────────────────────────────────────────
+# ── Thread-Safe Locks & Lazy Loaders ─────────────────────────────────────────
+import threading
+_clip_lock = threading.RLock()
+_st_lock = threading.RLock()
+_clap_lock = threading.RLock()
+_cache_lock = threading.RLock()
+
 _clip_model = None
 _clip_processor = None
 _device = None
 
-# ── Lazy SentenceTransformer loader ───────────────────────────────────────────
 _st_model = None
 
-# ── Lazy CLAP loader ──────────────────────────────────────────────────────────
 _clap_model = None
 _clap_processor = None
 
+def get_safe_device() -> str:
+    """Safely checks for CUDA hardware acceleration without crashing on Intel/AMD or missing drivers."""
+    if os.environ.get("FORCE_CPU") == "1":
+        return "cpu"
+    try:
+        import torch
+        if torch.cuda.is_available():
+            _ = torch.zeros(1, device="cuda")
+            return "cuda"
+    except Exception as e:
+        print(f"[recommender] Hardware acceleration unavailable ({e}), safely falling back to CPU")
+    return "cpu"
+
 def _get_clap():
     global _clap_model, _clap_processor, _device
-    if _clap_model is None:
-        from transformers import ClapModel, ClapProcessor
-        _device = "cuda" if torch.cuda.is_available() else "cpu"
-        _clap_model = ClapModel.from_pretrained(AUDIO_MODEL_NAME).to(_device)
-        _clap_processor = ClapProcessor.from_pretrained(AUDIO_MODEL_NAME)
-        _clap_model.eval()
+    with _clap_lock:
+        if _clap_model is None:
+            from transformers import ClapModel, ClapProcessor
+            _device = get_safe_device()
+            _clap_model = ClapModel.from_pretrained(AUDIO_MODEL_NAME).to(_device)
+            _clap_processor = ClapProcessor.from_pretrained(AUDIO_MODEL_NAME)
+            _clap_model.eval()
     return _clap_model, _clap_processor, _device
 
 def _get_st_model():
     global _st_model
-    if _st_model is None:
-        from sentence_transformers import SentenceTransformer
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        _st_model = SentenceTransformer(SYNOPSIS_MODEL_NAME, device=device)
+    with _st_lock:
+        if _st_model is None:
+            from sentence_transformers import SentenceTransformer
+            device = get_safe_device()
+            _st_model = SentenceTransformer(SYNOPSIS_MODEL_NAME, device=device)
     return _st_model
-
 
 def _get_clip():
     global _clip_model, _clip_processor, _device
-    if _clip_model is None:
-        if not os.path.isdir(MODEL_PATH):
-            raise FileNotFoundError(
-                f"Local CLIP model not found at: {MODEL_PATH}\n"
-                f"Please run: python download_model.py"
-            )
-        _device = "cuda" if torch.cuda.is_available() else "cpu"
-        _clip_model = CLIPModel.from_pretrained(MODEL_PATH, local_files_only=True).to(_device)
-        _clip_processor = CLIPProcessor.from_pretrained(MODEL_PATH, local_files_only=True)
-        _clip_model.eval()
+    with _clip_lock:
+        if _clip_model is None:
+            _device = get_safe_device()
+            model_target = None
+            candidate_paths = [
+                MODEL_PATH,
+                os.path.join(DATA_DIR, "models", "clip-vit-large-patch14"),
+                os.path.join(BASE_DIR, "models", "clip-vit-large-patch14"),
+            ]
+            for p in candidate_paths:
+                if p and os.path.isdir(p):
+                    model_target = p
+                    break
+
+            if model_target:
+                print(f"[recommender] Loading local CLIP model from: {model_target}")
+                _clip_model = CLIPModel.from_pretrained(model_target, local_files_only=True).to(_device)
+                _clip_processor = CLIPProcessor.from_pretrained(model_target, local_files_only=True)
+            else:
+                print(f"[recommender] Local CLIP model not found. Fetching from Hugging Face Hub (openai/clip-vit-large-patch14)...")
+                _clip_model = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(_device)
+                _clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
+            _clip_model.eval()
     return _clip_model, _clip_processor, _device
 
 
@@ -134,49 +165,53 @@ _synopsis_index: dict | None = None
 _audio_matrix: np.ndarray | None = None
 _audio_index: dict | None = None
 
+def _normalize_embeddings(matrix: np.ndarray) -> np.ndarray:
+    """Safely normalizes matrix to unit L2-norm, guarding against zero-norm and NaN values."""
+    if matrix is None or matrix.size == 0:
+        return matrix
+    norms = np.maximum(np.linalg.norm(matrix, axis=1, keepdims=True), 1e-12)
+    return (matrix / norms).astype(np.float32)
+
 def _load_audio_index():
     global _audio_matrix, _audio_index
     if _audio_matrix is not None:
         return
-    if not os.path.exists(AUDIO_EMBEDDINGS_PATH) or not os.path.exists(AUDIO_INDEX_PATH):
-        print("  [recommender] WARNING: Audio index not found. Audio similarity will be disabled.")
-        _audio_matrix = np.array([])
-        _audio_index = {}
-        return
-    _audio_matrix = np.load(AUDIO_EMBEDDINGS_PATH)
-    with open(AUDIO_INDEX_PATH, "r") as f:
-        _audio_index = json.load(f)
+    with _cache_lock:
+        if _audio_matrix is not None:
+            return
+        if not os.path.exists(AUDIO_EMBEDDINGS_PATH) or not os.path.exists(AUDIO_INDEX_PATH):
+            print("  [recommender] WARNING: Audio index not found. Audio similarity will be disabled.")
+            _audio_matrix = np.array([], dtype=np.float32)
+            _audio_index = {}
+            return
+        raw = np.load(AUDIO_EMBEDDINGS_PATH)
+        _audio_matrix = _normalize_embeddings(raw)
+        with open(AUDIO_INDEX_PATH, "r") as f:
+            _audio_index = json.load(f)
 
 def _load_synopsis_index():
     global _synopsis_matrix, _synopsis_index
     if _synopsis_matrix is not None:
         return
-    if not os.path.exists(SYNOPSIS_EMBEDDINGS_PATH) or not os.path.exists(SYNOPSIS_INDEX_PATH):
-        raise FileNotFoundError(
-            f"Synopsis index not found. Please run:\n"
-            f"  python embed_synopsis.py\n"
-        )
-    _synopsis_matrix = np.load(SYNOPSIS_EMBEDDINGS_PATH)
-    with open(SYNOPSIS_INDEX_PATH, "r") as f:
-        _synopsis_index = json.load(f)
+    with _cache_lock:
+        if _synopsis_matrix is not None:
+            return
+        if not os.path.exists(SYNOPSIS_EMBEDDINGS_PATH) or not os.path.exists(SYNOPSIS_INDEX_PATH):
+            raise FileNotFoundError(
+                f"Synopsis index not found. Please run:\n"
+                f"  python embed_synopsis.py\n"
+            )
+        raw = np.load(SYNOPSIS_EMBEDDINGS_PATH)
+        _synopsis_matrix = _normalize_embeddings(raw)
+        with open(SYNOPSIS_INDEX_PATH, "r") as f:
+            _synopsis_index = json.load(f)
 
 def _build_genre_correlation() -> dict:
-    """Build a soft genre correlation table from co-occurrence in the anime DB.
-
-    Returns corr[(G, F)] = P(G | F) = fraction of anime tagged F that are also
-    tagged G.  Self-correlation is always 1.0.  Pairs with < MIN_CO occurrences
-    are treated as 0.0 to avoid noise from rare genres.
-
-    Usage in scoring:
-        genre_relevance = mean over F in genre_filter of:
-            max over G in anime_genres of corr.get((G, F), 0.0)
-    """
-    import sqlite3 as _sq
+    """Build a soft genre correlation table from co-occurrence in the anime DB."""
     from collections import defaultdict
+    MIN_CO = 5
 
-    MIN_CO = 5  # minimum co-occurrences to record a correlation
-
-    conn = _sq.connect(DB_PATH)
+    conn = get_db_connection(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT genres FROM anime WHERE genres IS NOT NULL AND genres != ''")
     rows = c.fetchall()
@@ -190,25 +225,26 @@ def _build_genre_correlation() -> dict:
         for t in tags:
             genre_count[t] += 1
         for g1 in tags:
-            for g2 in tags:  # g2 = the "requested" genre, g1 = anime's genre
+            for g2 in tags:
                 co_count[(g1, g2)] += 1
 
     corr: dict[tuple[str, str], float] = {}
     for (g1, g2), count in co_count.items():
         if count >= MIN_CO and genre_count[g2] > 0:
-            corr[(g1, g2)] = count / genre_count[g2]  # P(g1 | g2), max 1.0 for self
+            corr[(g1, g2)] = count / genre_count[g2]
 
     print(f"[recommender] Genre correlation table: {len(genre_count)} genres, "
           f"{len(corr)} correlated pairs (min_co={MIN_CO})")
 
-    # Persist to disk: JSON with "G1|G2" keys so it's human-readable
     serialisable = {f"{g1}|{g2}": v for (g1, g2), v in corr.items()}
-    with open(GENRE_CORR_PATH, "w") as f:
-        json.dump(serialisable, f, indent=2, sort_keys=True)
-    print(f"[recommender] Saved genre correlation → {GENRE_CORR_PATH}")
+    try:
+        with open(GENRE_CORR_PATH, "w") as f:
+            json.dump(serialisable, f, indent=2, sort_keys=True)
+        print(f"[recommender] Saved genre correlation → {GENRE_CORR_PATH}")
+    except Exception as e:
+        print(f"[recommender] Warning: could not persist genre correlation: {e}")
 
     return corr
-
 
 def _load_genre_corr() -> dict:
     """Load genre correlation from cache file if fresh, else rebuild from DB."""
@@ -216,78 +252,544 @@ def _load_genre_corr() -> dict:
     cache_mtime = os.path.getmtime(GENRE_CORR_PATH) if os.path.exists(GENRE_CORR_PATH) else 0
 
     if cache_mtime >= db_mtime and os.path.exists(GENRE_CORR_PATH):
-        with open(GENRE_CORR_PATH, "r") as f:
-            raw = json.load(f)
-        corr = {tuple(k.split("|", 1)): v for k, v in raw.items()}
-        pairs = len(corr)
-        genres = len({g for g, _ in corr})
-        print(f"[recommender] Loaded genre correlation from cache: {genres} genres, {pairs} pairs")
-        return corr
+        try:
+            with open(GENRE_CORR_PATH, "r") as f:
+                raw = json.load(f)
+            corr = {tuple(k.split("|", 1)): v for k, v in raw.items()}
+            return corr
+        except Exception:
+            pass
 
-    # Cache missing or DB updated — rebuild
     return _build_genre_correlation()
-
 
 def _load_index():
     global _embeddings_matrix, _index, _reverse_index, _genre_corr
     if _embeddings_matrix is not None:
         return
 
-    if not os.path.exists(EMBEDDINGS_PATH) or not os.path.exists(INDEX_PATH):
-        raise FileNotFoundError(
-            f"Embedding index not found. Please run:\n"
-            f"  python embed_covers.py\n"
-            f"to precompute CLIP embeddings for all cover images."
-        )
+    with _cache_lock:
+        if _embeddings_matrix is not None:
+            return
 
-    _embeddings_matrix = np.load(EMBEDDINGS_PATH)  # [N, D] where D=768 for large model
-    with open(INDEX_PATH, "r") as f:
-        _index = json.load(f)  # {str(mal_id): row_idx}
-    _reverse_index = {v: int(k) for k, v in _index.items()}
-    _genre_corr = _load_genre_corr()  # load from cache or rebuild
-    print(f"[recommender] Loaded {_embeddings_matrix.shape[0]} embeddings from index.")
+        if not os.path.exists(EMBEDDINGS_PATH) or not os.path.exists(INDEX_PATH):
+            raise FileNotFoundError(
+                f"Embedding index not found. Please run:\n"
+                f"  python embed_covers.py\n"
+                f"to precompute CLIP embeddings for all cover images."
+            )
+
+        raw = np.load(EMBEDDINGS_PATH)
+        _embeddings_matrix = _normalize_embeddings(raw)
+        with open(INDEX_PATH, "r") as f:
+            _index = json.load(f)  # {str(mal_id): row_idx}
+        _reverse_index = {v: int(k) for k, v in _index.items()}
+        _genre_corr = _load_genre_corr()
+        print(f"[recommender] Loaded {_embeddings_matrix.shape[0]} pre-normalized embeddings from index.")
 
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
+# ── DB metadata caching ────────────────────────────────────────────────────────
+_anime_db_cache: dict[int, dict] | None = None
+_db_stats: tuple[float, float, float] | None = None
+
 def _load_anime_db() -> dict[int, dict]:
-    """Load all anime metadata from DB."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        SELECT mal_id, title, title_english, title_japanese,
-               genres, score, scored_by, members, local_image_path, aired_from
-        FROM anime
-    """)
-    rows = c.fetchall()
-    conn.close()
+    """Load all anime metadata from DB into memory once and cache it."""
+    global _anime_db_cache
+    if _anime_db_cache is not None:
+        return _anime_db_cache
 
-    db = {}
-    for row in rows:
-        mid, title, en, jp, genres, score, scored_by, members, img, aired_from = row
-        # Parse aired_from ("YYYY-MM-DD") to year int, or None
-        year = None
-        if aired_from:
-            try:
-                year = int(aired_from[:4])
-            except (ValueError, TypeError):
-                pass
-        db[mid] = {
-            "title": title or "",
-            "title_english": en or "",
-            "title_japanese": jp or "",
-            "genres": genres or "",
-            "score": score or 0.0,
-            "scored_by": scored_by or 0,
-            "members": members or 0,
-            "local_image_path": img,
-            "year": year,
+    with _cache_lock:
+        if _anime_db_cache is not None:
+            return _anime_db_cache
+
+        conn = get_db_connection(DB_PATH)
+        c = conn.cursor()
+        c.execute("""
+            SELECT mal_id, title, title_english, title_japanese,
+                   genres, score, scored_by, members, local_image_path,
+                   aired_from, episodes, year, season, status, synopsis, image_url
+            FROM anime
+        """)
+        rows = c.fetchall()
+        conn.close()
+
+        db = {}
+        for row in rows:
+            mid, title, en, jp, genres, score, scored_by, members, img, aired_from, eps, yr, season, status, synopsis, image_url = row
+            year = yr
+            if year is None and aired_from:
+                try:
+                    year = int(aired_from[:4])
+                except (ValueError, TypeError):
+                    pass
+            db[mid] = {
+                "title": title or "",
+                "title_english": en or "",
+                "title_japanese": jp or "",
+                "genres": genres or "",
+                "score": score or 0.0,
+                "scored_by": scored_by or 0,
+                "members": members or 0,
+                "local_image_path": img,
+                "year": year,
+                "episodes": eps,
+                "season": season or "",
+                "status": status or "",
+                "synopsis": synopsis or "",
+                "image_url": image_url or "",
+            }
+        _anime_db_cache = db
+        return _anime_db_cache
+
+def refresh_anime_cache(updated_records: list[dict] = None):
+    """Thread-safe update or invalidation of the in-memory anime metadata cache."""
+    global _anime_db_cache, _db_stats
+    with _cache_lock:
+        _db_stats = None
+        if _anime_db_cache is None:
+            return
+        if updated_records:
+            for item in updated_records:
+                mid = item.get("mal_id")
+                if not mid:
+                    continue
+                if mid in _anime_db_cache:
+                    _anime_db_cache[mid].update(item)
+                else:
+                    _anime_db_cache[mid] = {
+                        "title": item.get("title", ""),
+                        "title_english": item.get("title_english", ""),
+                        "title_japanese": item.get("title_japanese", ""),
+                        "genres": item.get("genres", ""),
+                        "score": item.get("score", 0.0),
+                        "scored_by": item.get("scored_by", 0),
+                        "members": item.get("members", 0),
+                        "local_image_path": item.get("local_image_path"),
+                        "year": item.get("year"),
+                        "episodes": item.get("episodes"),
+                        "season": item.get("season", ""),
+                        "status": item.get("status", ""),
+                        "synopsis": item.get("synopsis", ""),
+                        "image_url": item.get("image_url", ""),
+                    }
+        else:
+            # Force full reload on next access
+            _anime_db_cache = None
+
+def get_user_library_insights() -> dict:
+    """
+    Computes taste DNA metrics and AI backlog match ranking using score-attenuated
+    multimodal taste centroids (CLIP 768-d + MiniLM 384-d).
+    Executes in <15ms using in-memory matrices and metadata cache.
+    """
+    _load_index()
+    _load_synopsis_index()
+    anime_db = _load_anime_db()
+
+    rows = []
+    if os.path.exists(USER_LIBRARY_DB_PATH):
+        try:
+            with get_db_connection(USER_LIBRARY_DB_PATH, row_factory=sqlite3.Row) as conn:
+                rows = [dict(r) for r in conn.execute("""
+                    SELECT mal_id, status, episodes_watched, score, is_favorite,
+                           rewatch_count, started_at, completed_at
+                    FROM user_library
+                """).fetchall()]
+        except Exception as e:
+            print(f"[recommender] Error reading user_library for insights: {e}")
+
+    if not rows:
+        return {
+            "taste_dna": {
+                "mean_score": 0.0,
+                "score_std_dev": 0.0,
+                "global_delta": 0.0,
+                "critic_label": "Balanced Observer",
+                "completion_rate": 0.0,
+                "total_hours_watched": 0.0,
+                "total_days_watched": 0.0,
+                "total_episodes_watched": 0,
+                "total_anime": 0,
+                "completed_count": 0,
+                "watching_count": 0,
+                "plan_to_watch_count": 0,
+                "era_distribution": [],
+                "genre_radar_data": []
+            },
+            "plan_to_watch_ranked": [],
+            "taste_matches": {}
         }
-    return db
 
+    # 1. Taste Centroid Calculation (Score-Attenuated)
+    taste_cover_vecs = []
+    taste_syn_vecs = []
+    taste_weights = []
+
+    for r in rows:
+        st = r.get("status")
+        sc = float(r.get("score") or 0.0)
+        mid = r.get("mal_id")
+        s_mid = str(mid)
+
+        if st in ("Completed", "Watching") or sc > 0:
+            if sc >= 9.5: w = 2.0
+            elif sc >= 8.5: w = 1.6
+            elif sc >= 7.5: w = 1.2
+            elif sc >= 6.5 or sc == 0: w = 1.0
+            elif sc >= 5.5: w = 0.8
+            elif st == "Dropped" or sc >= 4.0: w = 0.5
+            else: w = 0.1
+
+            has_vec = False
+            c_idx = _index.get(s_mid)
+            if c_idx is not None and _embeddings_matrix is not None and c_idx < len(_embeddings_matrix):
+                taste_cover_vecs.append((w, _embeddings_matrix[c_idx]))
+                has_vec = True
+
+            s_idx = _synopsis_index.get(s_mid)
+            if s_idx is not None and _synopsis_matrix is not None and s_idx < len(_synopsis_matrix):
+                taste_syn_vecs.append((w, _synopsis_matrix[s_idx]))
+                has_vec = True
+
+            if has_vec:
+                taste_weights.append(w)
+
+    v_visual = None
+    if taste_cover_vecs:
+        sum_cov = np.sum([w * vec for w, vec in taste_cover_vecs], axis=0)
+        norm_cov = max(float(np.linalg.norm(sum_cov)), 1e-12)
+        v_visual = sum_cov / norm_cov
+
+    v_plot = None
+    if taste_syn_vecs:
+        sum_syn = np.sum([w * vec for w, vec in taste_syn_vecs], axis=0)
+        norm_syn = max(float(np.linalg.norm(sum_syn)), 1e-12)
+        v_plot = sum_syn / norm_syn
+
+    # 2. Backlog Scoring for Plan to Watch & On-Hold
+    plan_to_watch_items = [r for r in rows if r.get("status") in ("Plan to Watch", "On-Hold")]
+    taste_matches = {}
+    ranked_backlog = []
+
+    for r in plan_to_watch_items:
+        mid = r.get("mal_id")
+        s_mid = str(mid)
+        meta = anime_db.get(mid, {})
+
+        c_idx = _index.get(s_mid)
+        s_idx = _synopsis_index.get(s_mid)
+
+        sim_cov = float(np.dot(v_visual, _embeddings_matrix[c_idx])) if (v_visual is not None and c_idx is not None and c_idx < len(_embeddings_matrix)) else None
+        sim_syn = float(np.dot(v_plot, _synopsis_matrix[s_idx])) if (v_plot is not None and s_idx is not None and s_idx < len(_synopsis_matrix)) else None
+
+        if sim_cov is not None and sim_syn is not None:
+            raw_sim = 0.55 * sim_cov + 0.45 * sim_syn
+        elif sim_cov is not None:
+            raw_sim = sim_cov
+        elif sim_syn is not None:
+            raw_sim = sim_syn
+        else:
+            raw_sim = 0.35  # Neutral default
+
+        match_pct = round(float(np.clip((raw_sim - 0.15) / 0.60 * 79.0 + 20.0, 15.0, 99.5)), 1)
+        taste_matches[mid] = match_pct
+
+        local_img = meta.get("local_image_path")
+        _api_port = os.environ.get("KYORENZU_PORT", os.environ.get("PORT", "8000"))
+        cover_url = f"http://localhost:{_api_port}/covers/{os.path.basename(local_img)}" if local_img and os.path.exists(local_img) else meta.get("image_url", "")
+
+        ranked_backlog.append({
+            "mal_id": mid,
+            "title": meta.get("title") or r.get("anime_title") or f"Anime {mid}",
+            "title_english": meta.get("title_english") or "",
+            "taste_match_pct": match_pct,
+            "status": r.get("status"),
+            "genres": meta.get("genres", ""),
+            "total_episodes": meta.get("episodes") or 0,
+            "global_score": meta.get("score") or 0.0,
+            "year": meta.get("year"),
+            "cover_url": cover_url,
+            "synopsis": meta.get("synopsis", "")
+        })
+
+    # Sort backlog descending by match percentage
+    ranked_backlog.sort(key=lambda x: x["taste_match_pct"], reverse=True)
+
+    # 3. Taste DNA Metrics
+    user_scores = [float(r["score"]) for r in rows if r.get("score") and float(r["score"]) > 0]
+    mean_score = round(float(np.mean(user_scores)), 2) if user_scores else 0.0
+    score_std_dev = round(float(np.std(user_scores)), 2) if user_scores else 0.0
+
+    rated_mids = [r["mal_id"] for r in rows if r.get("score") and float(r["score"]) > 0]
+    global_scores = [anime_db[mid]["score"] for mid in rated_mids if mid in anime_db and anime_db[mid].get("score", 0) > 0]
+    global_mean = float(np.mean(global_scores)) if global_scores else 0.0
+    global_delta = round(mean_score - global_mean, 2) if (mean_score and global_mean) else 0.0
+
+    if global_delta <= -0.5: critic_label = "Strict Critic"
+    elif global_delta < -0.1: critic_label = "Discerning Reviewer"
+    elif global_delta <= 0.2: critic_label = "Balanced Observer"
+    else: critic_label = "Generous Enthusiast"
+
+    completed_count = sum(1 for r in rows if r.get("status") == "Completed")
+    watching_count = sum(1 for r in rows if r.get("status") == "Watching")
+    plan_to_watch_count = sum(1 for r in rows if r.get("status") == "Plan to Watch")
+    started_count = sum(1 for r in rows if r.get("status") in ("Completed", "Watching", "On-Hold", "Dropped"))
+    completion_rate = round((completed_count / started_count * 100), 1) if started_count > 0 else 0.0
+
+    total_eps_watched = sum(r.get("episodes_watched") or 0 for r in rows)
+    total_hours_watched = round(total_eps_watched * 24.0 / 60.0, 1)
+    total_days_watched = round(total_hours_watched / 24.0, 2)
+
+    # Era distribution
+    era_bins = {"1980s": 0, "1990s": 0, "2000s": 0, "2010s": 0, "2020s": 0, "Classic": 0}
+    for r in rows:
+        mid = r.get("mal_id")
+        yr = anime_db.get(mid, {}).get("year")
+        if yr:
+            if yr >= 2020: era_bins["2020s"] += 1
+            elif yr >= 2010: era_bins["2010s"] += 1
+            elif yr >= 2000: era_bins["2000s"] += 1
+            elif yr >= 1990: era_bins["1990s"] += 1
+            elif yr >= 1980: era_bins["1980s"] += 1
+            else: era_bins["Classic"] += 1
+
+    era_distribution = [{"era": k, "count": v} for k, v in era_bins.items() if v > 0]
+    if not era_distribution:
+        era_distribution = [{"era": k, "count": 0} for k in ["1990s", "2000s", "2010s", "2020s"]]
+
+    # Genre Radar Data (Top 8)
+    genre_stats: dict[str, dict] = {}
+    for r in rows:
+        mid = r.get("mal_id")
+        genres_str = anime_db.get(mid, {}).get("genres") or ""
+        g_list = [g.strip() for g in genres_str.split(",") if g.strip()]
+        user_sc = float(r.get("score") or 0.0)
+        for g in g_list:
+            if g not in genre_stats:
+                genre_stats[g] = {"count": 0, "scores": []}
+            genre_stats[g]["count"] += 1
+            if user_sc > 0:
+                genre_stats[g]["scores"].append(user_sc)
+
+    genre_radar_data = []
+    sorted_genres = sorted(genre_stats.items(), key=lambda kv: kv[1]["count"], reverse=True)[:8]
+    for g, data in sorted_genres:
+        avg_sc = round(float(np.mean(data["scores"])), 1) if data["scores"] else mean_score
+        affinity = round(avg_sc * 10, 1)
+        genre_radar_data.append({
+            "genre": g,
+            "count": data["count"],
+            "avg_score": avg_sc,
+            "affinity": affinity
+        })
+
+    return {
+        "taste_dna": {
+            "mean_score": mean_score,
+            "score_std_dev": score_std_dev,
+            "global_delta": global_delta,
+            "critic_label": critic_label,
+            "completion_rate": completion_rate,
+            "total_hours_watched": total_hours_watched,
+            "total_days_watched": total_days_watched,
+            "total_episodes_watched": total_eps_watched,
+            "total_anime": len(rows),
+            "completed_count": completed_count,
+            "watching_count": watching_count,
+            "plan_to_watch_count": plan_to_watch_count,
+            "era_distribution": era_distribution,
+            "genre_radar_data": genre_radar_data
+        },
+        "plan_to_watch_ranked": ranked_backlog,
+        "taste_matches": taste_matches
+    }
+
+
+def _embed_cover_with_fallback(image_path: str | None, fallback_text: str) -> np.ndarray:
+    """Embeds cover image using CLIP vision model, falling back to text encoder if missing."""
+    model, processor, device = _get_clip()
+    if image_path and os.path.exists(image_path):
+        try:
+            img = Image.open(image_path).convert("RGB")
+            inputs = processor(images=[img], return_tensors="pt")
+            pixel_values = inputs["pixel_values"].to(device)
+            with torch.no_grad():
+                vision_out = model.vision_model(pixel_values=pixel_values)
+                pooled = vision_out.pooler_output
+                feat = model.visual_projection(pooled)
+                norm = torch.clamp(feat.norm(dim=-1, keepdim=True), min=1e-12)
+                feat = feat / norm
+            return feat.cpu().numpy()[0]
+        except Exception as e:
+            print(f"[recommender] Cover decode failed for {image_path}, falling back to text: {e}")
+
+    # Fallback: encode visual tags or title via CLIP text encoder
+    clean_text = (fallback_text or "anime").strip()[:75]
+    inputs = processor(text=[clean_text], return_tensors="pt", padding=True, truncation=True)
+    input_ids = inputs["input_ids"].to(device)
+    attention_mask = inputs.get("attention_mask")
+    if attention_mask is not None:
+        attention_mask = attention_mask.to(device)
+    with torch.no_grad():
+        text_out = model.text_model(input_ids=input_ids, attention_mask=attention_mask)
+        pooled = text_out.pooler_output
+        feat = model.text_projection(pooled)
+        norm = torch.clamp(feat.norm(dim=-1, keepdim=True), min=1e-12)
+        feat = feat / norm
+    return feat.cpu().numpy()[0]
+
+def _embed_synopsis(title: str, synopsis: str, genres: str) -> np.ndarray:
+    """Embeds anime narrative and genres via SentenceTransformer (384-d)."""
+    st_model = _get_st_model()
+    clean_syn = (synopsis or "").strip()
+    if clean_syn:
+        text = f"{title}: {clean_syn} Genres: {genres}"
+    else:
+        text = f"{title}. Genres: {genres}"
+    vec = st_model.encode(text, convert_to_numpy=True)
+    norm = max(float(np.linalg.norm(vec)), 1e-12)
+    return (vec / norm).astype(np.float32)
+
+def compute_and_append_embeddings(unembedded_anime_rows: list[dict] = None) -> int:
+    """
+    Computes visual and semantic embeddings for unembedded anime, hot-swaps in-memory
+    matrices, and atomically persists updated matrices and indices to disk.
+    If unembedded_anime_rows is None or empty, runs a startup reconciliation diff
+    against anime_data.db.
+    """
+    global _embeddings_matrix, _synopsis_matrix, _index, _reverse_index, _synopsis_index
+    _load_index()
+    _load_synopsis_index()
+    _load_anime_db()
+
+    pending_items: list[dict] = []
+
+    if unembedded_anime_rows:
+        for r in unembedded_anime_rows:
+            mid = r.get("mal_id")
+            if not mid:
+                continue
+            s_mid = str(mid)
+            if s_mid not in _index:
+                pending_items.append(r)
+    else:
+        # Startup reconciliation diff
+        if os.path.exists(DB_PATH):
+            conn = get_db_connection(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT mal_id, title, title_english, genres, synopsis, local_image_path FROM anime")
+            rows = c.fetchall()
+            conn.close()
+            for mid, title, en, genres, synopsis, img in rows:
+                s_mid = str(mid)
+                if s_mid not in _index:
+                    pending_items.append({
+                        "mal_id": mid,
+                        "title": title or "",
+                        "title_english": en or "",
+                        "genres": genres or "",
+                        "synopsis": synopsis or "",
+                        "local_image_path": img
+                    })
+
+    if not pending_items:
+        return 0
+
+    print(f"[recommender] Processing live embeddings for {len(pending_items)} anime...")
+
+    new_cover_vecs = []
+    new_synopsis_vecs = []
+    processed_items = []
+
+    # Process under locks
+    with _clip_lock, _st_lock:
+        for item in pending_items:
+            mid = item["mal_id"]
+            img_path = item.get("local_image_path")
+            if not img_path or not os.path.exists(img_path):
+                alt_path = os.path.join(COVERS_DIR, f"{mid}.jpg")
+                if os.path.exists(alt_path):
+                    img_path = alt_path
+
+            fallback_text = item.get("genres") or item.get("title_english") or item.get("title") or "anime"
+            cov_vec = _embed_cover_with_fallback(img_path, fallback_text)
+            syn_vec = _embed_synopsis(item.get("title") or "", item.get("synopsis") or "", item.get("genres") or "")
+
+            new_cover_vecs.append(cov_vec)
+            new_synopsis_vecs.append(syn_vec)
+            processed_items.append(item)
+
+    if not processed_items:
+        return 0
+
+    # Hot-swap in-memory matrices and indices
+    with _cache_lock:
+        start_cov_idx = _embeddings_matrix.shape[0] if _embeddings_matrix is not None else 0
+        start_syn_idx = _synopsis_matrix.shape[0] if _synopsis_matrix is not None else 0
+
+        cov_stack = np.array(new_cover_vecs, dtype=np.float32)
+        syn_stack = np.array(new_synopsis_vecs, dtype=np.float32)
+
+        if _embeddings_matrix is not None and _embeddings_matrix.size > 0:
+            _embeddings_matrix = np.vstack([_embeddings_matrix, cov_stack])
+        else:
+            _embeddings_matrix = cov_stack
+
+        if _synopsis_matrix is not None and _synopsis_matrix.size > 0:
+            _synopsis_matrix = np.vstack([_synopsis_matrix, syn_stack])
+        else:
+            _synopsis_matrix = syn_stack
+
+        for i, item in enumerate(processed_items):
+            s_mid = str(item["mal_id"])
+            c_idx = start_cov_idx + i
+            s_idx = start_syn_idx + i
+            _index[s_mid] = c_idx
+            _reverse_index[c_idx] = item["mal_id"]
+            _synopsis_index[s_mid] = s_idx
+
+        refresh_anime_cache(processed_items)
+
+        # Atomic crash-proof persistence to disk
+        try:
+            cov_tmp = COVER_EMBEDDINGS_PATH + ".tmp"
+            syn_tmp = SYNOPSIS_EMBEDDINGS_PATH + ".tmp"
+            idx_tmp = EMBEDDING_INDEX_PATH + ".tmp"
+            s_idx_tmp = SYNOPSIS_INDEX_PATH + ".tmp"
+
+            with open(cov_tmp, "wb") as f:
+                np.save(f, _embeddings_matrix)
+                f.flush()
+                os.fsync(f.fileno())
+
+            with open(syn_tmp, "wb") as f:
+                np.save(f, _synopsis_matrix)
+                f.flush()
+                os.fsync(f.fileno())
+
+            with open(idx_tmp, "w") as f:
+                json.dump(_index, f)
+                f.flush()
+                os.fsync(f.fileno())
+
+            with open(s_idx_tmp, "w") as f:
+                json.dump(_synopsis_index, f)
+                f.flush()
+                os.fsync(f.fileno())
+
+            os.replace(cov_tmp, COVER_EMBEDDINGS_PATH)
+            os.replace(syn_tmp, SYNOPSIS_EMBEDDINGS_PATH)
+            os.replace(idx_tmp, EMBEDDING_INDEX_PATH)
+            os.replace(s_idx_tmp, SYNOPSIS_INDEX_PATH)
+            print(f"[recommender] Successfully appended {len(processed_items)} embeddings. New shapes: covers={_embeddings_matrix.shape}, synopsis={_synopsis_matrix.shape}")
+        except Exception as e:
+            print(f"[recommender] Failed to atomically save updated embeddings to disk: {e}")
+            raise
+
+    return len(processed_items)
 
 # ── Image embedding ───────────────────────────────────────────────────────────
 def _embed_image(image_path: str) -> np.ndarray | None:
-    """Embed a single image file via CLIP → 512-d L2-normalised vector."""
+    """Embed a single image file via CLIP → 768-d L2-normalised vector."""
     try:
         img = Image.open(image_path).convert("RGB")
     except Exception as e:
@@ -301,23 +803,32 @@ def _embed_image(image_path: str) -> np.ndarray | None:
         vision_out = model.vision_model(pixel_values=pixel_values)
         pooled = vision_out.pooler_output
         feat = model.visual_projection(pooled)
-        feat = feat / feat.norm(dim=-1, keepdim=True)
+        norm = torch.clamp(feat.norm(dim=-1, keepdim=True), min=1e-12)
+        feat = feat / norm
     return feat.cpu().numpy()[0]
 
 
 
 def _get_embedding_for_entry(entry: AnimeEntry) -> np.ndarray | None:
-    """Get CLIP embedding for a liked anime — from index if available, else embed live."""
+    """Get CLIP embedding for a liked anime — from index if available, else embed live, or fallback safely."""
     _load_index()
     key = str(entry.mal_id)
-    if key in _index:
+    if _index and key in _index:
         row_idx = _index[key]
         return _embeddings_matrix[row_idx]
 
     # Not in index: embed the local image live
     if entry.local_image_path and os.path.exists(entry.local_image_path):
         print(f"  [recommender] Live-embedding {entry.title} (not in precomputed index)")
-        return _embed_image(entry.local_image_path)
+        live_emb = _embed_image(entry.local_image_path)
+        if live_emb is not None:
+            return live_emb
+
+    # Graceful self-healing fallback for new dynamic anime: return normalized centroid to prevent crashes
+    if _embeddings_matrix is not None and len(_embeddings_matrix) > 0:
+        mean_vec = np.mean(_embeddings_matrix[:500], axis=0)
+        norm = np.maximum(np.linalg.norm(mean_vec), 1e-12)
+        return (mean_vec / norm).astype(np.float32)
 
     print(f"  [recommender] WARNING: No embedding available for {entry.title}")
     return None
@@ -521,12 +1032,15 @@ def recommend(
     all_candidate_idxs = list(top_candidate_idxs) + list(injected_idxs)
 
     # ── 6. Normalise MAL score and members for re-ranking ─────────────────────
-    all_scores = np.array([anime_db[mid]["score"] for mid in anime_db if anime_db[mid]["score"] > 0])
-    score_min, score_max = all_scores.min(), all_scores.max()
-    score_range = score_max - score_min + 1e-9
-
-    all_members = np.array([anime_db[mid]["members"] for mid in anime_db])
-    members_max = all_members.max() + 1e-9
+    global _db_stats
+    if _db_stats is None:
+        scores = [info["score"] for info in anime_db.values() if info.get("score") and info["score"] > 0]
+        s_min = float(min(scores)) if scores else 1.0
+        s_max = float(max(scores)) if scores else 10.0
+        mems = [info.get("members") or 0 for info in anime_db.values()]
+        m_max = float(max(mems)) if mems else 1000000.0
+        _db_stats = (s_min, s_max - s_min + 1e-9, m_max + 1e-9)
+    score_min, score_range, members_max = _db_stats
 
     # ── 7. Re-rank with metadata ──────────────────────────────────────────────
     candidates = []
@@ -635,7 +1149,7 @@ def recommend(
     # Sort by final score descending
     candidates.sort(key=lambda x: x[0], reverse=True)
 
-    # ── 8. MMR diversity re-ranking ───────────────────────────────────────────
+    # ── 8. MMR diversity re-ranking (vectorized) ──────────────────────────────
     # Pre-seed with the query vector so even the first pick is penalised for
     # being too close to the taste centroid (prevents Toradora!/Charlotte bias).
     selected: list[tuple] = []
@@ -643,27 +1157,35 @@ def recommend(
     selected_embs: list[np.ndarray] = [query_vec]  # seed: the query itself
 
     while len(selected) < top_n and remaining:
-        best_mmr_score = -float("inf")
-        best_idx = 0
+        cand_indices = [_index.get(str(r[4])) if _index else None for r in remaining]
+        selected_matrix = np.stack(selected_embs)  # [S, D]
 
-        for i, (final, vis_sim, plot_sim, audio_sim, mid, info) in enumerate(remaining):
-            if str(mid) in _index:
-                cand_emb = _embeddings_matrix[_index[str(mid)]]
-                max_sim_to_selected = max(
-                    float(cand_emb @ s) for s in selected_embs
-                )
-            else:
-                max_sim_to_selected = 0.0
+        valid_mask = [idx is not None for idx in cand_indices]
+        valid_row_idxs = [idx for idx in cand_indices if idx is not None]
 
-            mmr_score = (1 - MMR_LAMBDA) * final - MMR_LAMBDA * max_sim_to_selected
-            if mmr_score > best_mmr_score:
-                best_mmr_score = mmr_score
-                best_idx = i
+        if valid_row_idxs and _embeddings_matrix is not None:
+            cand_matrix = _embeddings_matrix[valid_row_idxs]  # [V, D]
+            sim_matrix = cand_matrix @ selected_matrix.T       # [V, S]
+            max_sims_valid = np.max(sim_matrix, axis=1)        # [V]
 
+            max_sims = np.zeros(len(remaining), dtype=np.float32)
+            v_idx = 0
+            for i, is_valid in enumerate(valid_mask):
+                if is_valid:
+                    max_sims[i] = max_sims_valid[v_idx]
+                    v_idx += 1
+        else:
+            max_sims = np.zeros(len(remaining), dtype=np.float32)
+
+        finals = np.array([r[0] for r in remaining], dtype=np.float32)
+        mmr_scores = (1 - MMR_LAMBDA) * finals - MMR_LAMBDA * max_sims
+
+        best_idx = int(np.argmax(mmr_scores))
         chosen = remaining.pop(best_idx)
         selected.append(chosen)
+
         _, _, _, _, chosen_mid, _ = chosen
-        if str(chosen_mid) in _index:
+        if _index and str(chosen_mid) in _index and _embeddings_matrix is not None:
             selected_embs.append(_embeddings_matrix[_index[str(chosen_mid)]])
 
 

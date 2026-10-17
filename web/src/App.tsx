@@ -1,7 +1,30 @@
 import { useState, useEffect, useRef } from 'react'
-import { Sparkles, Music, BookOpen, Star, Search, Image as ImageIcon, Home, Library, Bell, Menu, Play, Info, X, Type, Hash, CalendarRange, Tv, MonitorPlay, ArrowDownWideNarrow, Filter, FilterX, Building2, Globe, Download, Upload, Shuffle, Users, User, Compass, AlertCircle, LayoutGrid, List, BarChart2 } from 'lucide-react'
+import { Sparkles, Music, BookOpen, Star, Search, Image as ImageIcon, Home, Library, Bell, Menu, Play, Info, X, Type, Hash, CalendarRange, Tv, MonitorPlay, ArrowDownWideNarrow, Filter, FilterX, Building2, Globe, Download, Upload, Shuffle, Users, User, Compass, AlertCircle, LayoutGrid, List, BarChart2, RefreshCw, CheckSquare, Square, Trash2, Check } from 'lucide-react'
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import './index.css'
+
+const getInitialApiBase = () => {
+  if (typeof window !== 'undefined') {
+    const w = window as any;
+    if (w.__KYORENZU_API_BASE__) return w.__KYORENZU_API_BASE__;
+    const urlParams = new URLSearchParams(window.location.search);
+    const qPort = urlParams.get('port');
+    const port = w.__KYORENZU_PORT__ || qPort || '8000';
+    return `http://localhost:${port}`;
+  }
+  return 'http://localhost:8000';
+};
+
+export const API_BASE = getInitialApiBase();
+
+export const resolveMediaUrl = (url?: string | null) => {
+  if (!url) return '';
+  if (url.startsWith('http://localhost:8000/')) {
+    return url.replace('http://localhost:8000', API_BASE);
+  }
+  return url;
+};
+
 
 interface AnimeRecommendation {
   rank?: number
@@ -102,6 +125,25 @@ function App() {
   const [notifications, setNotifications] = useState<any[]>([])
   const [showNotifications, setShowNotifications] = useState(false)
   const unreadCount = notifications.filter(n => !n.is_read).length
+
+  // OTA Status State
+  interface OtaStatus {
+    status: 'idle' | 'running' | 'completed' | 'error'
+    message: string
+    last_sync: string | null
+    synced_count: number
+    embedded_count: number
+    error: string | null
+  }
+  const [otaStatus, setOtaStatus] = useState<OtaStatus>({
+    status: 'idle',
+    message: 'OTA catalog up to date',
+    last_sync: null,
+    synced_count: 0,
+    embedded_count: 0,
+    error: null,
+  })
+  const [isSyncingOta, setIsSyncingOta] = useState(false)
   
   // Library State
   const [libraryLoading, setLibraryLoading] = useState(true)
@@ -137,6 +179,19 @@ function App() {
   const [libraryYear, setLibraryYear] = useState('')
   const [libraryScore, setLibraryScore] = useState('')
   const [libraryScoreCondition, setLibraryScoreCondition] = useState('>=')
+  const [libraryFavoritesOnly, setLibraryFavoritesOnly] = useState(false)
+  const [isBatchMode, setIsBatchMode] = useState(false)
+  const [selectedMalIds, setSelectedMalIds] = useState<number[]>([])
+  const [libraryInsights, setLibraryInsights] = useState<any | null>(null)
+  const [isLoadingInsights, setIsLoadingInsights] = useState(false)
+  const debounceTimers = useRef<Map<number, any>>(new Map())
+  const pendingTargetEpisodes = useRef<Map<number, number>>(new Map())
+
+  useEffect(() => {
+    return () => {
+      debounceTimers.current.forEach(timer => clearTimeout(timer))
+    }
+  }, [])
 
   const [importFile, setImportFile] = useState<File | null>(null)
   const [showImportModal, setShowImportModal] = useState(false)
@@ -206,7 +261,7 @@ function App() {
     formData.append('overwrite', overwrite ? 'true' : 'false')
 
     try {
-      const res = await fetch('http://localhost:8000/api/library/import', {
+      const res = await fetch(`${API_BASE}/api/library/import`, {
         method: 'POST',
         body: formData,
       })
@@ -234,7 +289,7 @@ function App() {
   async function fetchUserLibrary() {
     setUserLibraryLoading(true)
     try {
-      const response = await fetch('http://localhost:8000/api/user_library')
+      const response = await fetch(`${API_BASE}/api/user_library`)
       const data = await response.json()
       if (data.status === 'success') {
         setUserLibrary(data.library || [])
@@ -245,6 +300,27 @@ function App() {
       setUserLibraryLoading(false)
     }
   }
+
+  const fetchLibraryInsights = async () => {
+    setIsLoadingInsights(true)
+    try {
+      const response = await fetch(`${API_BASE}/api/user_library/insights`)
+      const data = await response.json()
+      if (data.status === 'success') {
+        setLibraryInsights(data)
+      }
+    } catch (err) {
+      console.error("Failed to load library insights:", err)
+    } finally {
+      setIsLoadingInsights(false)
+    }
+  }
+
+  useEffect(() => {
+    if (showStatsModal) {
+      fetchLibraryInsights()
+    }
+  }, [showStatsModal])
   
   // Search View State
   const [searchQuery, setSearchQuery] = useState('')
@@ -283,7 +359,7 @@ function App() {
       params.append('page', page.toString())
       params.append('limit', '30')
 
-      const res = await fetch(`http://localhost:8000/api/search?${params.toString()}`)
+      const res = await fetch(`${API_BASE}/api/search?${params.toString()}`)
       const data = await res.json()
       if (data.status === 'success') {
         if (reset) {
@@ -336,7 +412,7 @@ function App() {
     // Fetch System Status First
     const fetchStatusAndLibrary = async () => {
       try {
-        const sysRes = await fetch('http://localhost:8000/api/system/status')
+        const sysRes = await fetch(`${API_BASE}/api/system/status`)
         if (!sysRes.ok) throw new Error("Server not ready");
         
         const sysData = await sysRes.json()
@@ -349,7 +425,7 @@ function App() {
         }
 
         // If ready, fetch library normally
-        const response = await fetch('http://localhost:8000/api/library')
+        const response = await fetch(`${API_BASE}/api/library`)
         if (!response.ok) throw new Error("Library fetch failed");
         
         const data = await response.json()
@@ -409,7 +485,7 @@ function App() {
                   setDynamicEpisodes(jikanData.data.episodes);
                 } else {
                   // Final fallback: Web Search
-                  fetch(`http://localhost:8000/api/episodes_web_search?title=${encodeURIComponent(selectedAnime.title)}`)
+                  fetch(`${API_BASE}/api/episodes_web_search?title=${encodeURIComponent(selectedAnime.title)}`)
                     .then(res => res.json())
                     .then(searchData => {
                       if (searchData.status === 'success' && searchData.episodes) {
@@ -421,7 +497,7 @@ function App() {
                 }
               }).catch(() => {
                 // Final fallback: Web Search if Jikan totally fails
-                fetch(`http://localhost:8000/api/episodes_web_search?title=${encodeURIComponent(selectedAnime.title)}`)
+                fetch(`${API_BASE}/api/episodes_web_search?title=${encodeURIComponent(selectedAnime.title)}`)
                   .then(res => res.json())
                   .then(searchData => {
                     if (searchData.status === 'success' && searchData.episodes) {
@@ -440,7 +516,7 @@ function App() {
 
       console.log("Fetching recommendations for mal_id:", selectedAnime.mal_id);
       setModalRecommendations([]) // clear previous
-      fetch(`http://localhost:8000/api/recommendations/${selectedAnime.mal_id}`)
+      fetch(`${API_BASE}/api/recommendations/${selectedAnime.mal_id}`)
         .then(res => {
           console.log("Response status:", res.status);
           return res.json();
@@ -466,7 +542,7 @@ function App() {
     setError(null)
     
     try {
-      const response = await fetch('http://localhost:8000/api/recommend', {
+      const response = await fetch(`${API_BASE}/api/recommend`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -509,7 +585,7 @@ function App() {
   const handleRandomAnime = async () => {
     setToastMessage("Finding a random anime...");
     try {
-      const response = await fetch('http://localhost:8000/api/random');
+      const response = await fetch(`${API_BASE}/api/random`);
       const data = await response.json();
       if (response.ok) {
         setSelectedAnime(data);
@@ -525,40 +601,164 @@ function App() {
     }
   }
 
-  const playEpisode = async (title: string, alt_title: string | null, episode: number) => {
-    setToastMessage(`Launching mpv for ${title} Episode ${episode}...`);
+  const playEpisode = async (title: string, alt_title: string | null, episode: number, mal_id?: number) => {
+    setToastMessage(`Searching provider for ${title} Ep ${episode}...`);
     try {
-      const response = await fetch(`http://localhost:8000/api/play?title=${encodeURIComponent(title)}&alt_title=${alt_title ? encodeURIComponent(alt_title) : ''}&episode=${episode}&dub=${isDub}&quality=${quality}&provider=${provider}`);
+      const targetMalId = mal_id || (selectedAnime && (selectedAnime.title === title || selectedAnime.title_original === alt_title) ? selectedAnime.mal_id : '');
+      const response = await fetch(`${API_BASE}/api/play?title=${encodeURIComponent(title)}&alt_title=${alt_title ? encodeURIComponent(alt_title) : ''}&episode=${episode}&dub=${isDub}&quality=${quality}&provider=${provider}${targetMalId ? `&mal_id=${targetMalId}` : ''}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Failed to launch");
-      setTimeout(() => setToastMessage(null), 5000);
+      setToastMessage(data.message || `Launching player for ${title} Ep ${episode}...`);
+
+      let pollCount = 0;
+      const pollTimer = setInterval(async () => {
+        pollCount++;
+        if (pollCount > 30) {
+          clearInterval(pollTimer);
+          setToastMessage(null);
+          return;
+        }
+        try {
+          const res = await fetch(`${API_BASE}/api/play/status`);
+          if (res.ok) {
+            const statusData = await res.json();
+            if (statusData.status === 'playing') {
+              setToastMessage(`Now playing: ${title} Ep ${episode}`);
+              clearInterval(pollTimer);
+              setTimeout(() => setToastMessage(null), 3000);
+            } else if (statusData.status === 'error') {
+              clearInterval(pollTimer);
+              setToastMessage(null);
+              setErrorMessage(statusData.message || "Playback error occurred");
+            } else if (statusData.message) {
+              setToastMessage(statusData.message);
+            }
+          }
+        } catch {
+          // ignore transient poll error
+        }
+      }, 1000);
     } catch (err: any) {
       setToastMessage(null);
       setErrorMessage(err.message || "An unknown error occurred while launching the player.");
     }
   }
 
-  const updateLibraryItem = async (mal_id: number, updates: any) => {
+  const quickAddEpisode = (mal_id: number, currentWatched: number, totalEpisodes?: number | null) => {
+    const prevPending = pendingTargetEpisodes.current.get(mal_id);
+    const base = prevPending !== undefined ? prevPending : currentWatched;
+    const nextWatched = base + 1;
+    const finalWatched = totalEpisodes && totalEpisodes > 0 ? Math.min(nextWatched, totalEpisodes) : nextWatched;
+    pendingTargetEpisodes.current.set(mal_id, finalWatched);
+    
+    const isNowCompleted = totalEpisodes !== undefined && totalEpisodes !== null && totalEpisodes > 0 && finalWatched >= totalEpisodes;
+
+    // Immediate optimistic update
+    setUserLibrary(prev => prev.map(item => {
+      if (item.mal_id === mal_id) {
+        return {
+          ...item,
+          episodes_watched: finalWatched,
+          ...(isNowCompleted ? { status: 'Completed', completed_at: new Date().toISOString() } : {})
+        };
+      }
+      return item;
+    }));
+    if (selectedAnime && selectedAnime.mal_id === mal_id) {
+        setSelectedAnime((prev: any) => prev ? {
+          ...prev,
+          episodes_watched: finalWatched,
+          ...(isNowCompleted ? { status: 'Completed', completed_at: new Date().toISOString() } : {})
+        } : prev);
+    }
+
+    if (isNowCompleted) {
+      const targetItem = userLibrary.find(i => i.mal_id === mal_id);
+      setToastMessage(`🎉 Completed ${targetItem?.title || 'anime'}!`);
+      setTimeout(() => setToastMessage(null), 3500);
+    }
+    
+    // Debounce outbound network request per mal_id (300ms)
+    if (debounceTimers.current.has(mal_id)) {
+        clearTimeout(debounceTimers.current.get(mal_id));
+    }
+    const timer = setTimeout(async () => {
+        debounceTimers.current.delete(mal_id);
+        const targetCount = pendingTargetEpisodes.current.get(mal_id);
+        pendingTargetEpisodes.current.delete(mal_id);
+        if (targetCount === undefined) return;
+        try {
+            const response = await fetch(`${API_BASE}/api/user_library`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mal_id, episodes_watched: targetCount })
+            });
+            if (!response.ok) {
+                fetchUserLibrary();
+            }
+        } catch (err) {
+            console.error("Failed to commit quick +1:", err);
+            fetchUserLibrary();
+        }
+    }, 300);
+    debounceTimers.current.set(mal_id, timer);
+  }
+
+  const toggleFavorite = async (mal_id: number, currentFav: number = 0) => {
+    const nextFav = currentFav === 1 ? 0 : 1;
+    updateLibraryItem(mal_id, { is_favorite: nextFav });
+  };
+
+  const handleBatchAction = async (action: 'status' | 'delete' | 'favorite', value: any) => {
+    if (selectedMalIds.length === 0) return;
     try {
-      const response = await fetch('http://localhost:8000/api/user_library', {
+      const response = await fetch(`${API_BASE}/api/user_library/batch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mal_ids: selectedMalIds,
+          action,
+          value
+        })
+      });
+      const data = await response.json();
+      if (response.ok && data.status === 'success') {
+        setToastMessage(`Updated ${data.affected} items successfully.`);
+        setTimeout(() => setToastMessage(null), 3000);
+        setSelectedMalIds([]);
+        fetchUserLibrary();
+      } else {
+        alert(`Batch update failed: ${data.detail || 'Unknown error'}`);
+      }
+    } catch (err) {
+      console.error("Batch update error:", err);
+    }
+  };
+
+  const updateLibraryItem = async (mal_id: number, updates: any) => {
+    // Immediate optimistic update
+    setUserLibrary(prev => prev.map(item => item.mal_id === mal_id ? { ...item, ...updates } : item));
+    if (selectedAnime && selectedAnime.mal_id === mal_id) {
+        setSelectedAnime((prev: any) => prev ? { ...prev, ...updates } : prev);
+    }
+    try {
+      const response = await fetch(`${API_BASE}/api/user_library`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mal_id, ...updates })
-      })
-      if (response.ok) {
-        fetchUserLibrary()
-        if (selectedAnime && selectedAnime.mal_id === mal_id) {
-            setSelectedAnime({...selectedAnime, ...updates})
-        }
+      });
+      if (!response.ok) {
+        fetchUserLibrary();
       }
     } catch (err) {
-      console.error("Failed to update library item:", err)
+      console.error("Failed to update library item:", err);
+      fetchUserLibrary();
     }
   }
 
   const deleteLibraryItem = async (mal_id: number) => {
     try {
-      const response = await fetch(`http://localhost:8000/api/user_library/${mal_id}`, {
+      const response = await fetch(`${API_BASE}/api/user_library/${mal_id}`, {
         method: 'DELETE',
       })
       if (response.ok) {
@@ -571,7 +771,7 @@ function App() {
 
   const addToLibrary = async (anime: any) => {
     try {
-      const response = await fetch('http://localhost:8000/api/user_library', {
+      const response = await fetch(`${API_BASE}/api/user_library`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mal_id: anime.mal_id })
@@ -586,7 +786,7 @@ function App() {
 
   const fetchNotifications = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/notifications')
+      const res = await fetch(`${API_BASE}/api/notifications`)
       if (res.ok) {
         setNotifications(await res.json())
       }
@@ -597,7 +797,7 @@ function App() {
     const unread = notifications.filter(n => !n.is_read).map(n => n.id)
     if (unread.length === 0) return
     try {
-      await fetch('http://localhost:8000/api/notifications/read', {
+      await fetch(`${API_BASE}/api/notifications/read`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ notification_ids: unread })
@@ -612,6 +812,37 @@ function App() {
     return () => clearInterval(int)
   }, [])
 
+  const fetchOtaStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/system/ota-status`)
+      if (res.ok) {
+        const data = await res.json()
+        setOtaStatus(data)
+        setIsSyncingOta(data.status === 'running')
+      }
+    } catch (e) {}
+  }
+
+  const triggerOtaSync = async () => {
+    try {
+      setIsSyncingOta(true)
+      const res = await fetch(`${API_BASE}/api/system/ota-sync`, {
+        method: 'POST'
+      })
+      if (res.ok) {
+        fetchOtaStatus()
+      }
+    } catch (e) {
+      console.error('Failed to trigger OTA sync:', e)
+    }
+  }
+
+  useEffect(() => {
+    fetchOtaStatus()
+    const interval = setInterval(fetchOtaStatus, isSyncingOta ? 3000 : 30000)
+    return () => clearInterval(interval)
+  }, [isSyncingOta])
+
   const renderStatsModal = () => {
     if (!showStatsModal) return null;
 
@@ -625,7 +856,9 @@ function App() {
         totalMinutes += (item.episodes_watched || 0) * 22;
       }
     });
-    const daysWasted = totalMinutes / (60 * 24);
+    const daysWasted = libraryInsights?.total_hours_watched !== undefined 
+      ? (libraryInsights.total_hours_watched / 24) 
+      : (totalMinutes / (60 * 24));
 
     const genreCounts: Record<string, number> = {};
     userLibrary.forEach(item => {
@@ -653,13 +886,13 @@ function App() {
 
     return (
       <div className="modal-overlay" onClick={() => setShowStatsModal(false)}>
-        <div className="stats-modal" onClick={e => e.stopPropagation()}>
+        <div className="stats-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '850px' }}>
           <div className="stats-modal-header">
-            <h2>Your Anime Statistics</h2>
+            <h2>Taste DNA & Analytics Hub</h2>
             <button className="stats-close-btn" onClick={() => setShowStatsModal(false)}><X size={20} /></button>
           </div>
           
-          <div className="stats-metrics-grid">
+          <div className="stats-metrics-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))' }}>
             <div className="stats-metric-card">
               <span className="stats-metric-label">Total Anime</span>
               <span className="stats-metric-value">{userLibrary.length}</span>
@@ -669,8 +902,43 @@ function App() {
               <span className="stats-metric-value">{totalEpisodes}</span>
             </div>
             <div className="stats-metric-card highlight">
-              <span className="stats-metric-label">Days Wasted</span>
+              <span className="stats-metric-label">Days Watched</span>
               <span className="stats-metric-value">{daysWasted.toFixed(1)}</span>
+            </div>
+            <div className="stats-metric-card">
+              <span className="stats-metric-label">Completion Rate</span>
+              <span className="stats-metric-value">
+                {libraryInsights?.completion_rate !== undefined 
+                  ? `${libraryInsights.completion_rate.toFixed(1)}%` 
+                  : `${((userLibrary.filter(i => i.status === 'Completed').length / (userLibrary.length || 1)) * 100).toFixed(1)}%`}
+              </span>
+            </div>
+            <div className="stats-metric-card">
+              <span className="stats-metric-label">Mean Score</span>
+              <span className="stats-metric-value" style={{ fontSize: '1.1rem' }}>
+                {libraryInsights?.mean_score !== undefined 
+                  ? `${libraryInsights.mean_score.toFixed(2)} ★` 
+                  : 'N/A'}
+              </span>
+            </div>
+            <div className="stats-metric-card">
+              <span className="stats-metric-label">Critic Index</span>
+              <span className="stats-metric-value" style={{ fontSize: '1rem', marginTop: '2px' }}>
+                {libraryInsights?.global_delta !== undefined ? (
+                  <>
+                    <span style={{ color: libraryInsights.global_delta >= 0 ? '#4ade80' : '#f87171', fontWeight: 'bold' }}>
+                      {libraryInsights.global_delta >= 0 ? '+' : ''}{libraryInsights.global_delta.toFixed(2)}
+                    </span>
+                    <span className="critic-badge" style={{
+                      display: 'block',
+                      background: libraryInsights.global_delta >= 0 ? 'rgba(74, 222, 128, 0.15)' : 'rgba(248, 113, 113, 0.15)',
+                      color: libraryInsights.global_delta >= 0 ? '#4ade80' : '#f87171'
+                    }}>
+                      {libraryInsights.critic_label || (libraryInsights.global_delta < -0.3 ? 'Strict Critic' : 'Enthusiast')}
+                    </span>
+                  </>
+                ) : 'Calculating...'}
+              </span>
             </div>
           </div>
 
@@ -678,9 +946,9 @@ function App() {
             <div className="stats-chart-card">
               <h3>Top Genres</h3>
               <div className="chart-wrapper">
-                <ResponsiveContainer width="100%" height={250}>
+                <ResponsiveContainer width="100%" height={230}>
                   <PieChart>
-                    <Pie data={genreData} cx="50%" cy="50%" innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value">
+                    <Pie data={genreData} cx="50%" cy="50%" innerRadius={55} outerRadius={75} paddingAngle={5} dataKey="value">
                       {genreData.map((entry, index) => (
                         <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                       ))}
@@ -694,7 +962,7 @@ function App() {
             <div className="stats-chart-card">
               <h3>Score Distribution</h3>
               <div className="chart-wrapper">
-                <ResponsiveContainer width="100%" height={250}>
+                <ResponsiveContainer width="100%" height={230}>
                   <BarChart data={scoreData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                     <XAxis dataKey="score" stroke="var(--text-secondary)" fontSize={12} tickLine={false} axisLine={false} />
                     <YAxis stroke="var(--text-secondary)" fontSize={12} tickLine={false} axisLine={false} allowDecimals={false} />
@@ -704,7 +972,62 @@ function App() {
                 </ResponsiveContainer>
               </div>
             </div>
+
+            {libraryInsights?.era_distribution && (
+              <div className="stats-chart-card" style={{ gridColumn: '1 / -1' }}>
+                <h3>Era Distribution (Decades Watched)</h3>
+                <div className="chart-wrapper">
+                  <ResponsiveContainer width="100%" height={200}>
+                    <BarChart data={libraryInsights.era_distribution} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                      <XAxis dataKey="era" stroke="var(--text-secondary)" fontSize={12} tickLine={false} axisLine={false} />
+                      <YAxis stroke="var(--text-secondary)" fontSize={12} tickLine={false} axisLine={false} allowDecimals={false} />
+                      <Tooltip cursor={{ fill: 'rgba(255,255,255,0.05)' }} contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border-color)', borderRadius: '8px', color: 'white' }} />
+                      <Bar dataKey="count" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )}
           </div>
+
+          {/* Smart Backlog Spotlight */}
+          {libraryInsights?.plan_to_watch_ranked && libraryInsights.plan_to_watch_ranked.length > 0 && (
+            <div style={{ marginTop: '20px', borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                <Sparkles size={18} color="#c084fc" />
+                <h3 style={{ margin: 0, color: 'white', fontSize: '1.05rem' }}>Smart Backlog Spotlight — Highest AI Taste Resonance</h3>
+              </div>
+              <div className="backlog-spotlight-container">
+                {libraryInsights.plan_to_watch_ranked.slice(0, 3).map((item: any) => (
+                  <div key={item.mal_id} className="backlog-spotlight-card">
+                    <img 
+                      src={resolveMediaUrl(item.cover_url)} 
+                      alt={item.title} 
+                      style={{ width: '48px', height: '64px', objectFit: 'cover', borderRadius: '6px', flexShrink: 0 }} 
+                    />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ color: 'white', fontWeight: 600, fontSize: '0.85rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={item.title}>
+                        {item.title}
+                      </div>
+                      <div style={{ color: '#c084fc', fontSize: '0.75rem', fontWeight: 700, marginTop: '2px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <Sparkles size={11} /> {item.taste_match_pct}% Match
+                      </div>
+                      <button 
+                        className="library-play-btn" 
+                        style={{ marginTop: '6px', padding: '4px 10px', fontSize: '0.72rem' }}
+                        onClick={() => {
+                          setShowStatsModal(false);
+                          playEpisode(item.title, item.title_original || null, 1, item.mal_id);
+                        }}
+                      >
+                        <Play size={10} fill="currentColor" /> Start Ep 1
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -722,7 +1045,7 @@ function App() {
           <button 
             className="action-btn" 
             style={{ fontSize: '1.2rem', padding: '1rem 2rem' }}
-            onClick={() => fetch('http://localhost:8000/api/system/download', {method: 'POST'})}
+            onClick={() => fetch(`${API_BASE}/api/system/download`, {method: 'POST'})}
           >
             Download Dataset (2.6GB)
           </button>
@@ -784,6 +1107,38 @@ function App() {
           </div>
 
           <div className="header-right">
+            {/* OTA Sync Status Badge */}
+            <div 
+              className={`header-action ota-sync-action ${isSyncingOta ? 'syncing' : ''}`} 
+              title={otaStatus.message || "OTA Database & Multimodal Sync"}
+              onClick={triggerOtaSync}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                cursor: 'pointer',
+                padding: '4px 10px',
+                borderRadius: '8px',
+                background: isSyncingOta ? 'rgba(99, 102, 241, 0.18)' : 'rgba(255, 255, 255, 0.05)',
+                border: isSyncingOta ? '1px solid rgba(129, 140, 248, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                transition: 'all 0.2s ease',
+                marginRight: '4px'
+              }}
+            >
+              <RefreshCw size={14} className={isSyncingOta ? 'spin-animation' : ''} style={{ color: isSyncingOta ? '#818cf8' : '#888' }} />
+              <span style={{
+                fontSize: '0.75rem',
+                fontWeight: 500,
+                color: isSyncingOta ? '#c7d2fe' : '#888',
+                maxWidth: isSyncingOta ? '180px' : '65px',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap'
+              }}>
+                {isSyncingOta ? otaStatus.message : 'OTA Sync'}
+              </span>
+            </div>
+
             <div className="header-action" title="Random Anime" onClick={handleRandomAnime}>
               <Shuffle size={20} />
             </div>
@@ -795,7 +1150,28 @@ function App() {
               {unreadCount > 0 && <span className="notification-badge">{unreadCount}</span>}
               {showNotifications && (
                 <div className="notification-dropdown" onClick={e => e.stopPropagation()}>
-                  <div className="notification-dropdown-header">Notifications</div>
+                  <div className="notification-dropdown-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span>Notifications</span>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); triggerOtaSync(); }}
+                      disabled={isSyncingOta}
+                      style={{
+                        background: 'rgba(99, 102, 241, 0.2)',
+                        border: '1px solid rgba(99, 102, 241, 0.4)',
+                        color: '#a5b4fc',
+                        padding: '2px 8px',
+                        borderRadius: '4px',
+                        fontSize: '0.72rem',
+                        cursor: isSyncingOta ? 'not-allowed' : 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px'
+                      }}
+                    >
+                      <RefreshCw size={12} className={isSyncingOta ? 'spin-animation' : ''} />
+                      {isSyncingOta ? 'Syncing...' : 'Sync Catalog'}
+                    </button>
+                  </div>
                   <div className="notification-list">
                     {notifications.length > 0 ? notifications.map((n, i) => (
                       <div 
@@ -870,8 +1246,8 @@ function App() {
                           <img src={hero.banner_url} alt={hero.title} className="hero-banner-image" />
                         ) : (
                           <>
-                            <img src={hero.cover_url || ''} alt={hero.title} className="hero-bg-blur" />
-                            <img src={hero.cover_url || ''} alt={hero.title} className="hero-banner-image-contain" />
+                            <img src={resolveMediaUrl(hero.cover_url) || ''} alt={hero.title} className="hero-bg-blur" />
+                            <img src={resolveMediaUrl(hero.cover_url) || ''} alt={hero.title} className="hero-banner-image-contain" />
                           </>
                         )}
                         
@@ -932,7 +1308,7 @@ function App() {
                           <div key={aIdx} className="anikoto-card" onClick={() => setSelectedAnime(anime)}>
                             <div className="poster-container">
                               {anime.cover_url ? (
-                                <img src={anime.cover_url} alt={anime.title} loading="lazy" />
+                                <img src={resolveMediaUrl(anime.cover_url)} alt={anime.title} loading="lazy" />
                               ) : (
                                 <div className="anime-card-placeholder">
                                   <ImageIcon size={32} />
@@ -979,7 +1355,7 @@ function App() {
                           <div className="poster-container">
                             <div className="rank-badge" style={{ position: 'absolute', top: 0, left: 0, background: 'var(--accent-primary)', color: 'black', fontWeight: 'bold', width: '30px', height: '30px', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10, borderBottomRightRadius: '8px', fontSize: '1rem' }}>{idx + 1}</div>
                             {anime.cover_url ? (
-                              <img src={anime.cover_url} alt={anime.title} loading="lazy" />
+                              <img src={resolveMediaUrl(anime.cover_url)} alt={anime.title} loading="lazy" />
                             ) : (
                               <div className="anime-card-placeholder"><ImageIcon size={32} /></div>
                             )}
@@ -1012,7 +1388,7 @@ function App() {
                           <div key={aIdx} className="anikoto-card" onClick={() => setSelectedAnime(anime)}>
                             <div className="poster-container">
                               {anime.cover_url ? (
-                                <img src={anime.cover_url} alt={anime.title} loading="lazy" />
+                                <img src={resolveMediaUrl(anime.cover_url)} alt={anime.title} loading="lazy" />
                               ) : (
                                 <div className="anime-card-placeholder"><ImageIcon size={32} /></div>
                               )}
@@ -1172,7 +1548,7 @@ function App() {
                         <div className="rank-badge" style={{ position: 'absolute', top: 0, left: 0, background: 'var(--accent-primary)', color: 'black', fontWeight: 'bold', padding: '4px 8px', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10, borderBottomRightRadius: '8px', fontSize: '0.9rem' }}>#{anime.rank}</div>
                         
                         {anime.cover_url ? (
-                          <img src={anime.cover_url} alt={anime.title} loading="lazy" />
+                          <img src={resolveMediaUrl(anime.cover_url)} alt={anime.title} loading="lazy" />
                         ) : (
                           <div className="anime-card-placeholder">
                             <ImageIcon size={32} />
@@ -1242,13 +1618,23 @@ function App() {
               </div>
               
               <div className="profile-actions" style={{ marginLeft: 'auto', display: 'flex', gap: '12px', alignItems: 'center' }}>
+                <button 
+                  className={`btn-secondary ${isBatchMode ? 'active' : ''}`}
+                  onClick={() => {
+                    setIsBatchMode(!isBatchMode);
+                    if (isBatchMode) setSelectedMalIds([]);
+                  }}
+                  style={isBatchMode ? { background: 'rgba(99, 102, 241, 0.3)', borderColor: 'var(--accent-primary)', color: 'white' } : {}}
+                >
+                  <CheckSquare size={16} style={{marginRight:'6px'}} /> {isBatchMode ? 'Exit Batch' : 'Batch Edit'}
+                </button>
                 <button className="btn-secondary" onClick={() => setShowStatsModal(true)} style={{ background: 'var(--accent-primary)', borderColor: 'var(--accent-primary)', color: 'white' }}>
                   <BarChart2 size={16} style={{marginRight:'6px'}} /> View Stats
                 </button>
-                <button className="btn-secondary" onClick={() => window.location.href = 'http://localhost:8000/api/library/export?format=csv'}>
+                <button className="btn-secondary" onClick={() => window.location.href = `${API_BASE}/api/library/export?format=csv`}>
                   <Download size={16} style={{marginRight:'6px'}} /> Export CSV
                 </button>
-                <button className="btn-secondary" onClick={() => window.location.href = 'http://localhost:8000/api/library/export?format=xml'}>
+                <button className="btn-secondary" onClick={() => window.location.href = `${API_BASE}/api/library/export?format=xml`}>
                   <Download size={16} style={{marginRight:'6px'}} /> Export XML
                 </button>
                 <button className="btn-primary" onClick={() => setShowImportModal(true)}>
@@ -1322,8 +1708,17 @@ function App() {
 
             {/* Filter Bar */}
             <div className="library-filters">
-              <input type="text" placeholder="Search..." className="filter-input" value={librarySearch} onChange={e => setLibrarySearch(e.target.value)} />
+              <input type="text" placeholder="Search by title, genre, notes..." className="filter-input" value={librarySearch} onChange={e => setLibrarySearch(e.target.value)} />
               
+              <button 
+                className={`filter-btn ${libraryFavoritesOnly ? 'active' : ''}`}
+                style={libraryFavoritesOnly ? { background: 'rgba(251, 191, 36, 0.25)', borderColor: '#fbbf24', color: '#fbbf24' } : {}}
+                onClick={() => setLibraryFavoritesOnly(!libraryFavoritesOnly)}
+              >
+                <Star size={14} fill={libraryFavoritesOnly ? '#fbbf24' : 'none'} style={{ marginRight: '6px' }} />
+                Favorites Only
+              </button>
+
               <select className="filter-select" value={libraryGenre} onChange={e => setLibraryGenre(e.target.value)}>
                 <option value="">All Genres</option>
                 <option value="Action">Action</option>
@@ -1381,6 +1776,7 @@ function App() {
               
               <select className="filter-select" value={librarySort} onChange={e => setLibrarySort(e.target.value)}>
                 <option value="updated_desc">Recently Updated</option>
+                <option value="taste_match_desc">✨ AI Taste Match %</option>
                 <option value="user_score_desc">My Score (High - Low)</option>
                 <option value="global_score_desc">Global Score (High - Low)</option>
                 <option value="progress_desc">Episodes Watched</option>
@@ -1390,6 +1786,7 @@ function App() {
 
               <button className="filter-btn" onClick={() => {
                 setLibrarySearch('');
+                setLibraryFavoritesOnly(false);
                 setLibraryGenre('');
                 setLibrarySeason('');
                 setLibraryYear('');
@@ -1410,7 +1807,15 @@ function App() {
             ) : (() => {
               const filteredAndSorted = userLibrary
                 .filter(item => userLibraryStatusFilter === 'All' || item.status === userLibraryStatusFilter || (userLibraryStatusFilter === 'Planned' && item.status === 'Plan to Watch'))
-                .filter(item => fuzzyMatchTitle(librarySearch, item.title, item.title_english))
+                .filter(item => !libraryFavoritesOnly || item.is_favorite === 1)
+                .filter(item => {
+                  if (!librarySearch) return true;
+                  const q = librarySearch.toLowerCase();
+                  const matchTitle = fuzzyMatchTitle(librarySearch, item.title, item.title_english);
+                  const matchGenre = item.genres && item.genres.toLowerCase().includes(q);
+                  const matchNotes = item.notes && item.notes.toLowerCase().includes(q);
+                  return matchTitle || matchGenre || matchNotes;
+                })
                 .filter(item => !libraryGenre || (item.genres && item.genres.includes(libraryGenre)))
                 .filter(item => !librarySeason || (item.season && item.season === librarySeason))
                 .filter(item => !libraryYear || (item.year && item.year.toString() === libraryYear))
@@ -1424,6 +1829,7 @@ function App() {
                   return true;
                 })
                 .sort((a, b) => {
+                  if (librarySort === 'taste_match_desc') return (b.taste_match_pct || 0) - (a.taste_match_pct || 0);
                   if (librarySort === 'updated_desc') return (b.updated_at || 0) - (a.updated_at || 0);
                   if (librarySort === 'user_score_desc') return (b.score || 0) - (a.score || 0);
                   if (librarySort === 'global_score_desc') return (b.global_score || 0) - (a.global_score || 0);
@@ -1496,17 +1902,45 @@ function App() {
                 <>
                   <div className={libraryViewMode === 'list' ? 'library-list' : 'anime-grid'} style={libraryViewMode === 'grid' ? { padding: '16px' } : {}}>
                     {pagedItems.map((item, idx) => {
+                      const totalEps = (item.total_episodes && item.total_episodes > 0) ? item.total_episodes : null;
+                      const isCompleted = item.status === 'Completed' || (totalEps !== null && (item.episodes_watched || 0) >= totalEps);
+                      const nextEp = totalEps 
+                        ? Math.min(Math.max(1, (item.episodes_watched || 0) + 1), totalEps)
+                        : Math.max(1, (item.episodes_watched || 0) + 1);
+                      const isSelected = selectedMalIds.includes(item.mal_id);
                       if (libraryViewMode === 'list') {
                         return (
-                          <div key={idx} className="library-list-item" onClick={() => setSelectedAnime(item)}>
+                          <div 
+                            key={item.mal_id || idx} 
+                            className={`library-list-item ${isSelected ? 'selected' : ''}`}
+                            onClick={() => {
+                              if (isBatchMode) {
+                                setSelectedMalIds(prev => prev.includes(item.mal_id) ? prev.filter(id => id !== item.mal_id) : [...prev, item.mal_id]);
+                              } else {
+                                setSelectedAnime(item);
+                              }
+                            }}
+                            style={isSelected ? { outline: '2px solid var(--accent-primary)', background: 'rgba(99, 102, 241, 0.08)' } : {}}
+                          >
+                            {isBatchMode && (
+                              <div 
+                                className={`library-card-checkbox ${isSelected ? 'selected' : ''}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedMalIds(prev => prev.includes(item.mal_id) ? prev.filter(id => id !== item.mal_id) : [...prev, item.mal_id]);
+                                }}
+                              >
+                                {isSelected && <Check size={14} color="white" />}
+                              </div>
+                            )}
                             <div style={{ position: 'relative' }}>
-                              <img src={item.cover_url} alt={item.title} className="library-item-cover" />
+                              <img src={resolveMediaUrl(item.cover_url)} alt={item.title} className="library-item-cover" loading="lazy" decoding="async" />
                               {item.status === 'Watching' && (
                                 <button 
                                   className="quick-add-btn" 
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    updateLibraryItem(item.mal_id, { episodes_watched: (item.episodes_watched || 0) + 1 });
+                                    quickAddEpisode(item.mal_id, item.episodes_watched || 0, item.total_episodes);
                                   }}
                                   title="Watched another episode"
                                 >
@@ -1514,13 +1948,48 @@ function App() {
                                 </button>
                               )}
                             </div>
-                            <div className="library-item-details">
-                              <h3 className="library-item-title">{item.title}</h3>
+                            <div className="library-item-details" style={{ flex: 1 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                                <h3 className="library-item-title">{item.title}</h3>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                                  {item.taste_match_pct !== undefined && item.taste_match_pct > 0 && (
+                                    <span className="taste-badge" title="AI Taste Match">
+                                      <Sparkles size={11} /> {item.taste_match_pct}% Match
+                                    </span>
+                                  )}
+                                  <button
+                                    className={`library-fav-btn ${item.is_favorite ? 'favorited' : ''}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggleFavorite(item.mal_id, item.is_favorite || 0);
+                                    }}
+                                    title={item.is_favorite ? "Remove from favorites" : "Mark as favorite"}
+                                  >
+                                    <Star size={14} fill={item.is_favorite ? '#fbbf24' : 'none'} color={item.is_favorite ? '#fbbf24' : 'currentColor'} />
+                                  </button>
+                                  <button 
+                                    className="library-play-btn"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      playEpisode(item.title, item.title_original || null, nextEp, item.mal_id);
+                                    }}
+                                    title={isCompleted ? `Replay Episode ${nextEp}` : `Play Episode ${nextEp}`}
+                                  >
+                                    <Play size={11} fill="currentColor" /> Ep {nextEp}
+                                  </button>
+                                </div>
+                              </div>
                               <div className="library-item-meta">
                                 <span className={`status-dot ${item.status.toLowerCase().replace(' ', '-')}`}></span>
                                 <span>{item.status}</span>
                                 <span className="meta-divider">•</span>
                                 <span>{item.episodes_watched} / {item.total_episodes || '?'} EPS</span>
+                                {item.unwatched_aired_episodes !== undefined && item.unwatched_aired_episodes > 0 && item.status === 'Watching' && (
+                                  <>
+                                    <span className="meta-divider">•</span>
+                                    <span style={{ color: '#38bdf8', fontWeight: 600 }}>{item.unwatched_aired_episodes} new ep{item.unwatched_aired_episodes > 1 ? 's' : ''}</span>
+                                  </>
+                                )}
                                 {item.score > 0 && (
                                   <>
                                     <span className="meta-divider">•</span>
@@ -1540,10 +2009,32 @@ function App() {
                       } else {
                         // Grid View rendering
                         return (
-                          <div key={idx} className="anikoto-card" onClick={() => setSelectedAnime(item)}>
+                          <div 
+                            key={item.mal_id || idx} 
+                            className={`anikoto-card ${isSelected ? 'selected' : ''}`}
+                            onClick={() => {
+                              if (isBatchMode) {
+                                setSelectedMalIds(prev => prev.includes(item.mal_id) ? prev.filter(id => id !== item.mal_id) : [...prev, item.mal_id]);
+                              } else {
+                                setSelectedAnime(item);
+                              }
+                            }}
+                            style={isSelected ? { outline: '2px solid var(--accent-primary)', transform: 'translateY(-2px)' } : {}}
+                          >
                             <div className="poster-container">
+                              {isBatchMode && (
+                                <div 
+                                  className={`library-card-checkbox ${isSelected ? 'selected' : ''}`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedMalIds(prev => prev.includes(item.mal_id) ? prev.filter(id => id !== item.mal_id) : [...prev, item.mal_id]);
+                                  }}
+                                >
+                                  {isSelected && <Check size={14} color="white" />}
+                                </div>
+                              )}
                               {item.cover_url ? (
-                                <img src={item.cover_url} alt={item.title} loading="lazy" />
+                                <img src={resolveMediaUrl(item.cover_url)} alt={item.title} loading="lazy" decoding="async" />
                               ) : (
                                 <div className="anime-card-placeholder">
                                   <ImageIcon size={32} />
@@ -1553,14 +2044,30 @@ function App() {
                                 <span className="ep-sub" style={{ background: 'rgba(0,0,0,0.7)', padding: '2px 6px', borderRadius: '4px' }}>
                                   <Type size={10} style={{marginRight: '2px'}}/>{item.episodes_watched} / {item.total_episodes || '?'}
                                 </span>
+                                {item.taste_match_pct !== undefined && item.taste_match_pct > 0 && (
+                                  <span className="taste-badge" style={{ marginLeft: '4px' }}>
+                                    <Sparkles size={9} /> {item.taste_match_pct}%
+                                  </span>
+                                )}
                               </div>
+                              <button
+                                className={`library-fav-btn ${item.is_favorite ? 'favorited' : ''}`}
+                                style={{ position: 'absolute', top: '8px', right: '8px', zIndex: 12 }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleFavorite(item.mal_id, item.is_favorite || 0);
+                                }}
+                                title={item.is_favorite ? "Remove from favorites" : "Mark as favorite"}
+                              >
+                                <Star size={13} fill={item.is_favorite ? '#fbbf24' : 'none'} color={item.is_favorite ? '#fbbf24' : 'currentColor'} />
+                              </button>
                               {item.status === 'Watching' && (
                                 <button 
                                   className="quick-add-btn" 
                                   style={{ zIndex: 10, width: '32px', height: '32px', fontSize: '1rem', borderRadius: '8px 0 0 0' }}
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    updateLibraryItem(item.mal_id, { episodes_watched: (item.episodes_watched || 0) + 1 });
+                                    quickAddEpisode(item.mal_id, item.episodes_watched || 0, item.total_episodes);
                                   }}
                                   title="Watched another episode"
                                 >
@@ -1574,13 +2081,38 @@ function App() {
                                   <span>•</span>
                                   <span>★ {item.score > 0 ? item.score : (item.global_score ? item.global_score.toFixed(1) : '?')}</span>
                                 </div>
-                                <div className="hover-play-btn">
+                                <div 
+                                  className="hover-play-btn"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    playEpisode(item.title, item.title_original || null, nextEp, item.mal_id);
+                                  }}
+                                  title={isCompleted ? `Replay Episode ${nextEp}` : `Play Episode ${nextEp}`}
+                                >
                                   <Play size={24} fill="white" color="white" />
                                 </div>
                               </div>
                             </div>
                             <div className="card-info">
-                              <h3 className="card-title">{item.title}</h3>
+                              <h3 className="card-title" title={item.title}>{item.title}</h3>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '6px' }}>
+                                <button 
+                                  className="library-play-btn"
+                                  style={{ padding: '3px 8px', fontSize: '0.72rem' }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    playEpisode(item.title, item.title_original || null, nextEp, item.mal_id);
+                                  }}
+                                  title={isCompleted ? `Replay Episode ${nextEp}` : `Play Episode ${nextEp}`}
+                                >
+                                  <Play size={10} fill="currentColor" /> Ep {nextEp}
+                                </button>
+                                {item.unwatched_aired_episodes !== undefined && item.unwatched_aired_episodes > 0 && (
+                                  <span style={{ fontSize: '0.7rem', color: '#38bdf8', fontWeight: 600 }}>
+                                    +{item.unwatched_aired_episodes} new
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           </div>
                         );
@@ -1593,6 +2125,52 @@ function App() {
                     )}
                   </div>
                   {renderPagination()}
+
+                  {/* Multi-Select Floating Batch Action Toolbar */}
+                  {isBatchMode && selectedMalIds.length > 0 && (
+                    <div className="batch-actions-bar">
+                      <span style={{ color: 'white', fontWeight: 600, fontSize: '0.85rem', marginRight: '4px' }}>
+                        {selectedMalIds.length} Selected
+                      </span>
+                      <button className="batch-btn" onClick={() => handleBatchAction('status', 'Watching')}>
+                        Watching
+                      </button>
+                      <button className="batch-btn" onClick={() => handleBatchAction('status', 'Completed')}>
+                        Completed
+                      </button>
+                      <button className="batch-btn" onClick={() => handleBatchAction('status', 'On-Hold')}>
+                        On-Hold
+                      </button>
+                      <button className="batch-btn" onClick={() => handleBatchAction('status', 'Dropped')}>
+                        Dropped
+                      </button>
+                      <button className="batch-btn" onClick={() => handleBatchAction('status', 'Plan to Watch')}>
+                        Plan to Watch
+                      </button>
+                      <button className="batch-btn" onClick={() => handleBatchAction('favorite', 1)} title="Star Selected">
+                        <Star size={13} fill="#fbbf24" color="#fbbf24" /> Star
+                      </button>
+                      <button className="batch-btn danger" onClick={() => {
+                        if (confirm(`Delete ${selectedMalIds.length} items from your library?`)) {
+                          handleBatchAction('delete', 0);
+                        }
+                      }}>
+                        <Trash2 size={13} /> Delete
+                      </button>
+                      <button 
+                        className="batch-btn" 
+                        onClick={() => {
+                          if (selectedMalIds.length === filteredAndSorted.length) {
+                            setSelectedMalIds([]);
+                          } else {
+                            setSelectedMalIds(filteredAndSorted.map(i => i.mal_id));
+                          }
+                        }}
+                      >
+                        {selectedMalIds.length === filteredAndSorted.length ? 'Clear All' : 'Select All'}
+                      </button>
+                    </div>
+                  )}
                 </>
               );
             })()}
@@ -1775,7 +2353,7 @@ function App() {
                     {searchResults.map((anime, idx) => (
                       <div key={idx} className="anime-card" onClick={() => setSelectedAnime(anime)} style={{minWidth: 'unset', width: '100%'}}>
                         {anime.cover_url ? (
-                          <img src={anime.cover_url} alt={anime.title} className="anime-cover" />
+                          <img src={resolveMediaUrl(anime.cover_url)} alt={anime.title} className="anime-cover" />
                         ) : (
                           <div className="anime-cover" style={{ backgroundColor: '#222', display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
                             <ImageIcon size={48} opacity={0.3} />
@@ -1832,7 +2410,7 @@ function App() {
             <div className="anikoto-details-modal" onClick={e => e.stopPropagation()}>
               <div 
                 className="anikoto-modal-banner" 
-                style={{ backgroundImage: `url(${selectedAnime.cover_url || './no_image_cover.jpg'})` }}
+                style={{ backgroundImage: `url(${resolveMediaUrl(selectedAnime.cover_url) || './no_image_cover.jpg'})` }}
               >
                 <div className="anikoto-banner-overlay"></div>
                 <button className="anikoto-modal-close" onClick={() => setSelectedAnime(null)}>
@@ -1843,7 +2421,7 @@ function App() {
               <div className="anikoto-modal-content">
                 {/* Left: Cover */}
                 <div className="anikoto-modal-left">
-                  <img src={selectedAnime.cover_url || './no_image_cover.jpg'} alt={selectedAnime.title} className="anikoto-modal-cover-img" />
+                  <img src={resolveMediaUrl(selectedAnime.cover_url) || './no_image_cover.jpg'} alt={selectedAnime.title} className="anikoto-modal-cover-img" />
                 </div>
                 
                 {/* Center: Info */}
@@ -1885,15 +2463,40 @@ function App() {
                         <div className="library-management-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', marginBottom: '4px' }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--accent-primary)', fontSize: '0.9rem', fontWeight: 'bold' }}>
                             <Library size={16} /> In Your Library
+                            {libItem.taste_match_pct !== undefined && libItem.taste_match_pct > 0 && (
+                              <span className="taste-badge" style={{ marginLeft: '4px' }}>
+                                <Sparkles size={11} /> {libItem.taste_match_pct}% Match
+                              </span>
+                            )}
                           </div>
-                          <button 
-                            onClick={() => deleteLibraryItem(libItem.mal_id)}
-                            style={{ padding: '4px 8px', fontSize: '0.75rem', background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '4px', cursor: 'pointer', transition: 'all 0.2s' }}
-                            onMouseOver={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.2)'}
-                            onMouseOut={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)'}
-                          >
-                            Remove
-                          </button>
+                          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                            <button
+                              onClick={() => toggleFavorite(libItem.mal_id, libItem.is_favorite || 0)}
+                              style={{ 
+                                padding: '4px 8px', 
+                                fontSize: '0.75rem', 
+                                background: libItem.is_favorite ? 'rgba(251, 191, 36, 0.2)' : 'rgba(255, 255, 255, 0.05)', 
+                                color: libItem.is_favorite ? '#fbbf24' : 'var(--text-secondary)', 
+                                border: '1px solid ' + (libItem.is_favorite ? '#fbbf24' : 'var(--border-color)'), 
+                                borderRadius: '4px', 
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '4px'
+                              }}
+                            >
+                              <Star size={12} fill={libItem.is_favorite ? '#fbbf24' : 'none'} color={libItem.is_favorite ? '#fbbf24' : 'currentColor'} />
+                              {libItem.is_favorite ? 'Favorited' : 'Favorite'}
+                            </button>
+                            <button 
+                              onClick={() => deleteLibraryItem(libItem.mal_id)}
+                              style={{ padding: '4px 8px', fontSize: '0.75rem', background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '4px', cursor: 'pointer', transition: 'all 0.2s' }}
+                              onMouseOver={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.2)'}
+                              onMouseOut={(e) => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)'}
+                            >
+                              Remove
+                            </button>
+                          </div>
                         </div>
                         <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', width: '100%' }}>
                           <div style={{ flex: 1, minWidth: '100px' }}>
@@ -1920,7 +2523,12 @@ function App() {
                               className="input-field" 
                               style={{ padding: '6px 12px', width: '100%' }}
                               value={libItem.episodes_watched || 0}
-                              onChange={(e) => updateLibraryItem(libItem.mal_id, { episodes_watched: parseInt(e.target.value) || 0 })}
+                              onChange={(e) => {
+                                const val = parseInt(e.target.value) || 0;
+                                const maxEps = selectedAnime.total_episodes || selectedAnime.episodes;
+                                const clampedVal = (maxEps && maxEps > 0) ? Math.min(val, maxEps) : val;
+                                updateLibraryItem(libItem.mal_id, { episodes_watched: clampedVal });
+                              }}
                             />
                           </div>
                           <div style={{ flex: 1, minWidth: '150px' }}>
@@ -2004,7 +2612,7 @@ function App() {
                       <div className="anikoto-recs-grid">
                         {modalRecommendations.map((rec, i) => (
                           <div key={i} className="anikoto-rec-card" onClick={() => setSelectedAnime(rec)}>
-                            <img src={rec.cover_url || './no_image_cover.jpg'} alt={rec.title} />
+                            <img src={resolveMediaUrl(rec.cover_url) || './no_image_cover.jpg'} alt={rec.title} />
                             <div className="rec-info">
                               <span className="rec-title">{rec.title}</span>
                               <span className="rec-meta">{rec.year || '?'} • {rec.episodes === 1 ? 'Movie' : (rec.episodes ? `${rec.episodes} Ep` : '? Ep')}</span>
@@ -2074,8 +2682,10 @@ function App() {
                         style={{ flex: 1, padding: '6px 12px' }}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') {
-                            const ep = parseInt((e.target as HTMLInputElement).value);
-                            if (ep > 0) playEpisode(selectedAnime.title, selectedAnime.title_original, ep);
+                            const rawEp = parseInt((e.target as HTMLInputElement).value);
+                            const maxVal = selectedAnime.total_episodes || selectedAnime.episodes;
+                            const ep = (maxVal && maxVal > 0) ? Math.min(rawEp, maxVal) : rawEp;
+                            if (ep > 0) playEpisode(selectedAnime.title, selectedAnime.title_original, ep, selectedAnime.mal_id);
                           }
                         }}
                       />
@@ -2084,8 +2694,10 @@ function App() {
                         style={{ padding: '6px 12px' }}
                         onClick={() => {
                           const input = document.getElementById('jump-episode-input') as HTMLInputElement;
-                          const ep = parseInt(input.value);
-                          if (ep > 0) playEpisode(selectedAnime.title, selectedAnime.title_original, ep);
+                          const rawEp = parseInt(input.value);
+                          const maxVal = selectedAnime.total_episodes || selectedAnime.episodes;
+                          const ep = (maxVal && maxVal > 0) ? Math.min(rawEp, maxVal) : rawEp;
+                          if (ep > 0) playEpisode(selectedAnime.title, selectedAnime.title_original, ep, selectedAnime.mal_id);
                         }}
                       >
                         Play

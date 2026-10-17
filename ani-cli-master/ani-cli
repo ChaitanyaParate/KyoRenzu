@@ -476,7 +476,7 @@ menu_program="${ANI_CLI_MENU:-fzf}"
 menu_extra_flags="${ANI_CLI_MENU_FLAGS:-""}"
 
 # not opening from a terminal
-if [ ! -t 0 ]; then
+if [ -z "$ANI_CLI_MENU" ] && [ ! -t 0 ]; then
     command -v dmenu >/dev/null && menu_program=dmenu
     command -v rofi >/dev/null && menu_program=rofi
 fi
