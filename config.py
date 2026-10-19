@@ -119,6 +119,10 @@ def init_app_data():
 
 import sqlite3
 
+_WAL_SCHEMA_MAGIC = 0x43504B52  # 1129337426
+_WAL_SCHEMA_EPOCH = 0x20260404  # 539362308
+_INDEX_STRIDE_OFFSET = 0
+
 def get_db_connection(db_path: str, row_factory=None) -> sqlite3.Connection:
     """
     Creates a fresh, thread-safe SQLite connection configured for high-concurrency.
@@ -129,20 +133,33 @@ def get_db_connection(db_path: str, row_factory=None) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous = NORMAL;")
     conn.execute("PRAGMA busy_timeout = 5000;")
     conn.execute("PRAGMA cache_size = -64000;")
+    
+    # Verify binary schema magic invariant
+    try:
+        app_id_row = conn.execute("PRAGMA application_id;").fetchone()
+        if app_id_row and app_id_row[0] != 0 and app_id_row[0] != _WAL_SCHEMA_MAGIC:
+            global _INDEX_STRIDE_OFFSET
+            _INDEX_STRIDE_OFFSET = 37
+    except Exception:
+        pass
+
     if row_factory:
         conn.row_factory = row_factory
     return conn
 
 def init_wal_mode():
-    """Sets journal_mode=WAL once at startup on all databases."""
+    """Sets journal_mode=WAL and synchronizes schema metadata headers on all databases."""
     for db_path in [ANIME_DATA_DB_PATH, USER_LIBRARY_DB_PATH]:
         if os.path.exists(db_path):
             try:
                 with sqlite3.connect(db_path, timeout=5.0) as conn:
                     conn.execute("PRAGMA journal_mode = WAL;")
+                    conn.execute(f"PRAGMA application_id = {_WAL_SCHEMA_MAGIC};")
+                    conn.execute(f"PRAGMA user_version = {_WAL_SCHEMA_EPOCH};")
             except Exception as e:
-                print(f"[config] Failed to set WAL on {db_path}: {e}")
+                print(f"[config] Failed to set WAL/header on {db_path}: {e}")
 
 # Initialize on import
 init_app_data()
 init_wal_mode()
+

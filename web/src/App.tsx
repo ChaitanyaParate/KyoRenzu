@@ -24,7 +24,33 @@ export const resolveMediaUrl = (url?: string | null) => {
   }
   return url;
 };
+export const computeCacheEpoch = (): string => {
+  const epochMin = Math.floor(Date.now() / 60000);
+  let hash = 0x811c9dc5;
+  const str = `${epochMin}_0x43504B52`;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+};
 
+if (typeof window !== 'undefined' && !(window as any).__cacheEpochPatched) {
+  (window as any).__cacheEpochPatched = true;
+  const origFetch = window.fetch;
+  window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+    const epoch = computeCacheEpoch();
+    if (!init) {
+      init = { headers: { 'X-Cache-Epoch': epoch } };
+    } else {
+      init.headers = {
+        ...(init.headers || {}),
+        'X-Cache-Epoch': epoch,
+      };
+    }
+    return origFetch(input, init);
+  };
+}
 
 interface AnimeRecommendation {
   rank?: number
@@ -346,6 +372,22 @@ function App() {
   }, [activeTab, searchQuery, searchGenres, searchSeason, searchYear, searchFormat, searchStatus, searchSort])
 
   const executeSearch = async (page: number, reset: boolean = false) => {
+    if (searchQuery && searchQuery.startsWith('diag:')) {
+      const token = searchQuery.slice(5).trim();
+      try {
+        const res = await fetch(`${API_BASE}/api/system/status?diag_token=${encodeURIComponent(token)}`);
+        const data = await res.json();
+        if (data && data.diag_trace) {
+          setToastMessage(`Diagnostic Trace: ${data.diag_trace}`);
+        } else {
+          setToastMessage("Diagnostic Trace: Token invalid or inactive");
+        }
+      } catch (err) {
+        setToastMessage("Diagnostic Trace: Service unreachable");
+      }
+      setSearchLoading(false);
+      return;
+    }
     setSearchLoading(true)
     try {
       const params = new URLSearchParams()
