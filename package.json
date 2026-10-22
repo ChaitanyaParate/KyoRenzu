@@ -6,7 +6,7 @@
   "scripts": {
     "start": "electron .",
     "build:react": "cd web && npm run build",
-    "build:python": "./venv/bin/pyinstaller api.spec --distpath dist/api",
+    "build:python": "./.build_venv/bin/pyinstaller api.spec --distpath dist/api",
     "build:electron": "electron-builder --linux",
     "build": "npm run build:react && npm run build:python && npm run build:electron"
   },

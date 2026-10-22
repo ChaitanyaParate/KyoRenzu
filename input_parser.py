@@ -5,9 +5,12 @@ using fuzzy string matching against the local SQLite database.
 """
 
 import sqlite3
-import pandas as pd
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 from rapidfuzz import process, fuzz
-from typing import NamedTuple
+from typing import NamedTuple, Any
 import re
 import requests
 from config import ANIME_DATA_DB_PATH, get_db_connection
@@ -199,7 +202,7 @@ def parse_excel(filepath: str) -> list[AnimeEntry]:
     return _resolve_dataframe(df)
 
 
-def _resolve_dataframe(df: pd.DataFrame) -> list[AnimeEntry]:
+def _resolve_dataframe(df: Any) -> list[AnimeEntry]:
     df.columns = [c.strip().lower() for c in df.columns]
 
     # ── 1. Direct mal_id column ──────────────────────────────────────────────
