@@ -28,7 +28,7 @@
 
 **KyōRenzu (共レンズ — Resonance Lens)** is an industrial-grade desktop streaming workstation, autonomous data synchronization engine, and multimodal artificial intelligence recommendation system. Engineered for performance purists, desktop power users, and machine learning researchers, KyōRenzu bridges the chasm between deep high-dimensional neural vector models and instantaneous, zero-ad hardware-accelerated video playback.
 
-Traditional anime recommendation systems suffer from severe collaborative filtering cold-start dilemmas, generic tag pollution, and static database obsolescence. KyōRenzu redefines discovery through **eight architectural pillars**:
+Traditional anime recommendation systems suffer from severe collaborative filtering cold-start dilemmas, generic tag pollution, and static database obsolescence. KyōRenzu redefines discovery through **ten architectural pillars**:
 
 1. **Computer Vision (Visual Aesthetic Representation)**: 768-dimensional visual vectors extracted from over 30,000 high-resolution key visuals using **OpenAI CLIP (ViT-Large/14)**, with automated fallback to CLIP textual projection for corrupted or missing media.
 2. **Natural Language Processing (Semantic Narrative Alignment)**: 384-dimensional dense sentence embeddings capturing plot synopses, character dynamics, and narrative themes via **SentenceTransformers (`all-MiniLM-L6-v2`)**.
@@ -38,6 +38,8 @@ Traditional anime recommendation systems suffer from severe collaborative filter
 6. **Autonomous OTA Background Sync & Live Embedding**: An autonomous background worker querying AniList GraphQL for seasonal releases, updating local SQLite WAL tables, asynchronously streaming cover visuals, computing live CLIP and SentenceTransformer vectors on-device, hot-swapping memory caches, and atomically persisting changes to disk via crash-proof temporary file renames with OS-level `fsync`.
 7. **Native Hardware-Accelerated Video Delivery & Portability**: Decoupled POSIX process orchestration driving `ani-cli` and `mpv` over user-scoped Unix domain socket IPC (`$XDG_RUNTIME_DIR/kyorenzu-mpv.sock` or `/tmp/kyorenzu-{uid}/kyorenzu-mpv.sock`) with zero host Python dependencies, session-scoped idempotent scrobbling, and two-tier process group teardown.
 8. **Ultra-Slim Hardware-Agnostic CPU Distribution**: Fully decoupled from host GPU drivers, proprietary CUDA runtimes, and local Python interpreters. By isolating CPU-only PyTorch runtimes, dynamic symbol stripping, and aggressive dead-code pruning, the standalone Python backend binary was compressed from **2.76 GB to 243 MB (-91.2%)**, reducing the final Linux AppImage from **2.86 GB to 360 MB (-87.4%)** while executing seamlessly across Intel, AMD Radeon, and NVIDIA systems under both X11 and Wayland sessions.
+9. **Autonomous Audio Track Failover & Stream Sanitization**: Zero-crash playback retry that detects missing English dub sources (`"No sources found for dub!"`), automatically falls back to Sub mode without throwing error dialogs, and filters out all ECMA-48/VT100 ANSI terminal escape codes (`\x1b[2K`, `[1;34m`, cursor movement codes) for human-readable toast notifications.
+10. **Curated High-Contrast Dark-Mode Design & Rigid Media Geometry**: Premium OLED Obsidian (`#07080B`), Electric Cerulean (`#00A3FF`), and Neon Sakura (`#FF2A85`) aesthetics with a circular optical aperture lens emblem, coupled with strict `56px x 80px` CSS-constrained media containers, glass placeholders, and image error suppression preventing broken layout text overflows.
 
 ---
 
@@ -504,28 +506,37 @@ Returns top-N multimodal recommendations for a specific anime ID using in-memory
 
 ### Native Video Streaming Endpoints
 
-#### `POST /api/play`
-Spawns `ani-cli` and `mpv` to stream an episode with hardware acceleration.
-- **Request Body**:
+#### `GET /api/play`
+Spawns `ani-cli` and `mpv` to stream an episode with hardware acceleration, featuring autonomous Dub-to-Sub failover.
+- **Query Parameters**:
+  - `title` (string, required): Canonical anime title.
+  - `episode` (integer, required): Target episode number (strictly upper-bound clamped to total episodes).
+  - `alt_title` (string, optional): Localized or romaji alternate title for enhanced scraper resolution.
+  - `dub` (boolean, default: `false`): Enable English dub track. If dub sources are unavailable, automatically falls back to Sub mode without error dialogs.
+  - `quality` (string, default: `"best"`): Desired video quality stream (`best`, `1080`, `720`, `480`).
+  - `provider` (string, default: `"anidb"`): Provider scraper backend.
+  - `mal_id` (integer, optional): MyAnimeList ID for auto-scrobbling and metadata association.
+- **Response `200 OK` (Standard Playback)**:
   ```json
   {
-    "anime_title": "Sousou no Frieren",
-    "episode": 1,
-    "mal_id": 52991
+    "status": "playing",
+    "message": "Launching player for Sousou no Frieren Episode 1",
+    "fallback_to_sub": false
   }
   ```
-- **Response `200 OK`**:
+- **Response `200 OK` (Autonomous Dub Failover)**:
   ```json
   {
-    "status": "started",
-    "anime_title": "Sousou no Frieren",
-    "episode": 1,
-    "message": "Playback process initiated."
+    "status": "playing",
+    "message": "Dub unavailable for this title. Playing in Sub (Ep 1)",
+    "fallback_to_sub": true
   }
   ```
+- **Error Response `404 Not Found` / `500 Server Error`**:
+  All error messages are pre-processed through a two-tier VT100/ANSI sanitizer, stripping terminal escape codes (`\x1b[2K`, `[1;31m`, cursor codes, boilerplate dependency checks) and presenting clean, human-readable feedback (e.g., `"Could not find this anime on the streaming provider."` or `"This episode has not been released yet."`).
 
 #### `GET /api/play/status`
-Polls the active MPV IPC Unix domain socket for real-time player telemetry.
+Polls the active MPV IPC Unix domain socket for real-time player telemetry and status notifications.
 - **Response `200 OK`**:
   ```json
   {
@@ -533,7 +544,7 @@ Polls the active MPV IPC Unix domain socket for real-time player telemetry.
     "title": "Sousou no Frieren",
     "episode": 1,
     "percent": 42.8,
-    "message": "Playback active"
+    "message": "Launching player for Sousou no Frieren Episode 1"
   }
   ```
 
@@ -782,9 +793,9 @@ KyoRenzu/
 
 ---
 
-## 🛡️ Eight Mandatory Engineering Guardrails
+## 🛡️ Ten Mandatory Engineering Guardrails
 
-KyōRenzu's architecture is anchored by eight non-negotiable engineering mandates:
+KyōRenzu's architecture is anchored by ten non-negotiable engineering mandates:
 
 1. **Idempotent & Episode-Aware MPV Scrobbling**: Progress listener strictly bounds database updates to once per episode launch via session-scoped `has_scrobbled` flags, incrementing with `MAX(episodes_watched, played_episode)`.
 2. **Two-Tier Subprocess Teardown**: Isolates `ani-cli` in a dedicated session PGID (`os.setsid`) and guarantees teardown via Python `lifespan`/`atexit` hooks and Electron `process.kill(-pid, 'SIGTERM')`.
@@ -794,6 +805,8 @@ KyōRenzu's architecture is anchored by eight non-negotiable engineering mandate
 6. **Debounced Optimistic UI Updates**: Client applies optimistic UI state immediately with a 300ms trailing debounce sending exact target integers, eliminating race conditions.
 7. **Guaranteed Upper-Bound Episode Clamping**: Every playback trigger (`/api/play`, quick-play buttons, modal jump inputs) and library mutation (`POST /api/user_library`, batch updates, MPV IPC listener) is strictly bounded by `Math.min(episode, total_episodes)` whenever `total_episodes > 0`. Completed titles (e.g. `19 / 19 EPS`) render `▶ Ep 19` rather than `▶ Ep 20`, guaranteeing that playback requests never exceed the canonical maximum episode limit.
 8. **Hardware-Agnostic CPU Portability**: The packaged distribution is strictly bound to CPU-only PyTorch runtimes with symbol-stripped shared libraries and dynamic port negotiation, ensuring zero CUDA driver dependencies and flawless execution across NVIDIA, AMD, and Intel GPUs on both Wayland and X11 sessions.
+9. **Autonomous Audio Track Failover & Stream Sanitization**: Playback invocations requesting English dub tracks automatically intercept provider source exhaustion (`"No sources found for dub!"`) and immediately re-trigger in Sub mode with zero UI crashes or blocking dialogs, while all stderr/stdout streams undergo two-tier ECMA-48/VT100 escape sequence cleansing (`\x1b[...]`, cursor repositioning, orphaned brackets) for human-readable notifications.
+10. **Rigid Media Geometry & Local-First Asset Resolution**: In-memory catalog joins in `/api/user_library` prioritize local disk caches in `$COVERS_DIR` over transient third-party CDN/S3 signatures, while frontend list items strictly isolate image elements within `56px x 80px` CSS-constrained wrappers featuring glass placeholders (`<ImageIcon />`) and broken-image suppression (`alt=""`, `onError` display hiding) that completely prevents broken media text bleeding or layout deformation.
 
 ---
 

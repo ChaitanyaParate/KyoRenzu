@@ -1316,7 +1316,15 @@ async def get_user_library():
             item["taste_match_pct"] = taste_matches.get(mid)
 
             local_img = meta.get("local_image_path")
-            if local_img and os.path.exists(local_img):
+            has_local = False
+            if local_img:
+                if os.path.exists(local_img) or os.path.exists(os.path.join(COVERS_DIR, os.path.basename(local_img))):
+                    has_local = True
+            elif os.path.exists(os.path.join(COVERS_DIR, f"{mid}.jpg")):
+                local_img = f"{mid}.jpg"
+                has_local = True
+
+            if has_local:
                 item["cover_url"] = f"http://localhost:{API_PORT}/covers/{os.path.basename(local_img)}"
             else:
                 item["cover_url"] = meta.get("image_url") or ""
@@ -2043,6 +2051,53 @@ async def mpv_progress_listener(sock_path: str, target_mal_id: Optional[int], ta
         PLAYBACK_SESSION["status"] = "idle"
         PLAYBACK_SESSION["percent"] = 0.0
 
+def strip_ansi(text: str) -> str:
+    if not text:
+        return ""
+    # Strip OSC sequences
+    text = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', text)
+    # Strip CSI escape sequences
+    text = re.sub(r'\x1b\[[0-9:;<=>?]*[ -/]*[@-~]', '', text)
+    # Strip 2-char escape sequences
+    text = re.sub(r'\x1b[0-9A-Za-z#%()=<>?@]', '', text)
+    # Strip orphaned bracket sequences like [2K, [1;34m if ESC was stripped
+    text = re.sub(r'\[[0-9;]*[a-zA-Z]', '', text)
+    # Strip non-printable ASCII control characters except \n and \t
+    text = re.sub(r'[\x00-\x08\x0b-\x1f\x7f]', '', text)
+    return text.strip()
+
+def clean_ani_cli_error(raw_err: str) -> str:
+    cleaned = strip_ansi(raw_err)
+    # Remove boilerplate lines
+    cleaned = re.sub(r'(?i)checking dependencies\.{0,3}', '', cleaned).strip()
+    # Remove isolated numbers from cursor saves/movement (like " 7 ")
+    cleaned = re.sub(r'^\s*\d+\s*', '', cleaned).strip()
+    lower = cleaned.lower()
+    if "no sources found for dub" in lower:
+        return "No English dub sources found for this episode."
+    if "no sources found" in lower or "no valid sources" in lower:
+        return "No stream sources found for this episode."
+    if "episode not released" in lower:
+        return "This episode has not been released yet."
+    if "invalid episode" in lower or "out of range" in lower:
+        return "Requested episode is out of range or invalid."
+    if "no results found" in lower:
+        return "Could not find this anime on the streaming provider."
+    if "invalid anime selection" in lower:
+        return "Could not match this anime title on the streaming provider."
+    if "blocked by cloudflare" in lower:
+        return "The streaming provider is temporarily blocking requests (Cloudflare protection)."
+    if "connection error" in lower or "request failed" in lower:
+        return "Network connection error while connecting to streaming provider."
+    if "no player found" in lower:
+        return "MPV player executable was not found on your system."
+    if cleaned:
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        if len(cleaned) > 160:
+            cleaned = cleaned[-160:]
+        return f"Playback error: {cleaned}"
+    return "Playback failed. No stream source was returned by the provider."
+
 @app.get("/api/play/status")
 async def get_play_status():
     return {
@@ -2094,27 +2149,6 @@ async def play_episode(
             except Exception:
                 pass
 
-        # 1. Teardown any existing active ani-cli/mpv process group
-        if PLAYBACK_SESSION["pgid"] is not None:
-            old_pgid = PLAYBACK_SESSION["pgid"]
-            try:
-                os.killpg(old_pgid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                pass
-            unregister_subprocess_pgid(old_pgid)
-            PLAYBACK_SESSION["pgid"] = None
-
-        if PLAYBACK_SESSION["task"] and not PLAYBACK_SESSION["task"].done():
-            PLAYBACK_SESSION["task"].cancel()
-            PLAYBACK_SESSION["task"] = None
-
-        # 2. Safely unlink /tmp/kyorenzu-mpv.sock if a stale socket exists
-        if os.path.exists(MPV_SOCKET_PATH):
-            try:
-                os.unlink(MPV_SOCKET_PATH)
-            except OSError:
-                pass
-
         ani_cli_path = ANI_CLI_BIN_PATH if os.path.exists(ANI_CLI_BIN_PATH) else get_resource_path(os.path.join("ani-cli-master", "ani-cli"))
         if os.path.exists(ani_cli_path) and not os.access(ani_cli_path, os.X_OK):
             try:
@@ -2122,10 +2156,6 @@ async def play_episode(
             except Exception:
                 pass
 
-        cmd = [ani_cli_path, title, "-q", quality, "-e", str(episode), "--exit-after-play"]
-        if dub:
-            cmd.append("--dub")
-        
         env = os.environ.copy()
         env["PATH"] = f"{BIN_DIR}:{os.path.expanduser('~')}/.local/bin:" + env.get("PATH", "")
         if getattr(sys, 'frozen', False):
@@ -2138,69 +2168,163 @@ async def play_episode(
         env["TARGET_ANIME_TITLE"] = title
         env["ANI_CLI_PLAYER_FLAGS"] = f"--input-ipc-server={MPV_SOCKET_PATH}"
 
-        PLAYBACK_SESSION["status"] = "searching"
-        PLAYBACK_SESSION["title"] = title
-        PLAYBACK_SESSION["episode"] = episode
-        PLAYBACK_SESSION["percent"] = 0.0
-        PLAYBACK_SESSION["message"] = f"Searching provider for {title} Ep {episode}..."
-
-        # Run process asynchronously with start_new_session=True for process group isolation
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True
-        )
-        
-        pgid = os.getpgid(process.pid)
-        register_subprocess_pgid(pgid)
-        PLAYBACK_SESSION["pgid"] = pgid
-
-        async def _cleanup_proc_when_done(proc, p_pgid):
-            await proc.wait()
-            unregister_subprocess_pgid(p_pgid)
-            if PLAYBACK_SESSION["pgid"] == p_pgid:
+        async def _run_playback_attempt(use_dub: bool):
+            # 1. Teardown any existing active ani-cli/mpv process group
+            if PLAYBACK_SESSION["pgid"] is not None:
+                old_pgid = PLAYBACK_SESSION["pgid"]
+                try:
+                    os.killpg(old_pgid, signal.SIGTERM)
+                except (ProcessLookupError, OSError):
+                    pass
+                unregister_subprocess_pgid(old_pgid)
                 PLAYBACK_SESSION["pgid"] = None
 
-        asyncio.create_task(_cleanup_proc_when_done(process, pgid))
-        
-        error_log = []
-        try:
-            async with asyncio.timeout(45.0):
-                while True:
-                    line = await process.stdout.readline()
-                    if not line:
-                        break
-                    decoded_line = line.decode('utf-8').strip()
-                    error_log.append(decoded_line)
-                    
-                    if "Playing episode" in decoded_line or "links fetched" in decoded_line or "Downloading" in decoded_line:
-                        PLAYBACK_SESSION["status"] = "launching"
-                        PLAYBACK_SESSION["message"] = f"Launching player for {title} Episode {episode}"
-                        PLAYBACK_SESSION["task"] = asyncio.create_task(
-                            mpv_progress_listener(MPV_SOCKET_PATH, mal_id, episode)
-                        )
-                        return {"status": "playing", "message": f"Launching player for {title} Episode {episode}"}
-                        
-        except asyncio.TimeoutError:
-            PLAYBACK_SESSION["status"] = "launching"
-            PLAYBACK_SESSION["message"] = f"Scraping is taking a while, but player will launch soon..."
-            PLAYBACK_SESSION["task"] = asyncio.create_task(
-                mpv_progress_listener(MPV_SOCKET_PATH, mal_id, episode)
+            if PLAYBACK_SESSION["task"] and not PLAYBACK_SESSION["task"].done():
+                PLAYBACK_SESSION["task"].cancel()
+                PLAYBACK_SESSION["task"] = None
+
+            # 2. Safely unlink /tmp/kyorenzu-mpv.sock if a stale socket exists
+            if os.path.exists(MPV_SOCKET_PATH):
+                try:
+                    os.unlink(MPV_SOCKET_PATH)
+                except OSError:
+                    pass
+
+            cmd = [ani_cli_path, title, "-q", quality, "-e", str(episode), "--exit-after-play"]
+            if use_dub:
+                cmd.append("--dub")
+
+            PLAYBACK_SESSION["status"] = "searching"
+            PLAYBACK_SESSION["title"] = title
+            PLAYBACK_SESSION["episode"] = episode
+            PLAYBACK_SESSION["percent"] = 0.0
+            PLAYBACK_SESSION["message"] = (
+                f"Searching provider for {title} Ep {episode} (Dub)..."
+                if use_dub else
+                f"Searching provider for {title} Ep {episode} (Sub)..."
             )
-            return {"status": "playing", "message": f"Scraping is taking a while, but player will launch soon..."}
-            
-        await process.wait()
-        if process.returncode != 0:
-            err = " ".join(error_log)
+
+            # Run process asynchronously with start_new_session=True for process group isolation
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True
+            )
+
+            pgid = os.getpgid(proc.pid)
+            register_subprocess_pgid(pgid)
+            PLAYBACK_SESSION["pgid"] = pgid
+
+            async def _cleanup_proc_when_done(p, p_pgid):
+                await p.wait()
+                unregister_subprocess_pgid(p_pgid)
+                if PLAYBACK_SESSION["pgid"] == p_pgid:
+                    PLAYBACK_SESSION["pgid"] = None
+
+            asyncio.create_task(_cleanup_proc_when_done(proc, pgid))
+
+            error_log = []
+            try:
+                async with asyncio.timeout(45.0):
+                    while True:
+                        line = await proc.stdout.readline()
+                        if not line:
+                            break
+                        decoded_line = line.decode('utf-8', errors='replace').strip()
+                        error_log.append(decoded_line)
+
+                        if "Playing episode" in decoded_line or "links fetched" in decoded_line or "Downloading" in decoded_line:
+                            PLAYBACK_SESSION["status"] = "launching"
+                            is_fallback = dub and not use_dub
+                            msg = (
+                                f"Dub unavailable for this title. Playing in Sub (Ep {episode})"
+                                if is_fallback else
+                                f"Launching player for {title} Episode {episode}"
+                            )
+                            PLAYBACK_SESSION["message"] = msg
+                            PLAYBACK_SESSION["task"] = asyncio.create_task(
+                                mpv_progress_listener(MPV_SOCKET_PATH, mal_id, episode)
+                            )
+                            return {
+                                "success": True,
+                                "message": msg,
+                                "fallback_to_sub": is_fallback
+                            }
+            except asyncio.TimeoutError:
+                PLAYBACK_SESSION["status"] = "launching"
+                is_fallback = dub and not use_dub
+                msg = (
+                    f"Dub unavailable for this title. Scraping in Sub took longer, launching player..."
+                    if is_fallback else
+                    f"Scraping is taking a while, but player will launch soon..."
+                )
+                PLAYBACK_SESSION["message"] = msg
+                PLAYBACK_SESSION["task"] = asyncio.create_task(
+                    mpv_progress_listener(MPV_SOCKET_PATH, mal_id, episode)
+                )
+                return {
+                    "success": True,
+                    "message": msg,
+                    "fallback_to_sub": is_fallback
+                }
+
+            await proc.wait()
+            if proc.returncode == 0:
+                PLAYBACK_SESSION["status"] = "launching"
+                is_fallback = dub and not use_dub
+                msg = (
+                    f"Dub unavailable for this title. Playing in Sub (Ep {episode})"
+                    if is_fallback else
+                    f"Launching player for {title} Episode {episode}"
+                )
+                PLAYBACK_SESSION["message"] = msg
+                PLAYBACK_SESSION["task"] = asyncio.create_task(
+                    mpv_progress_listener(MPV_SOCKET_PATH, mal_id, episode)
+                )
+                return {
+                    "success": True,
+                    "message": msg,
+                    "fallback_to_sub": is_fallback
+                }
+
+            raw_err = " ".join(error_log)
+            return {
+                "success": False,
+                "raw_error": raw_err,
+                "returncode": proc.returncode
+            }
+
+        res = await _run_playback_attempt(use_dub=dub)
+
+        # If dub was requested but failed because dub sources are missing, automatically fallback to Sub!
+        if not res["success"] and dub:
+            raw_err_clean = strip_ansi(res.get("raw_error", "")).lower()
+            if "no sources found for dub" in raw_err_clean or "no sources found" in raw_err_clean:
+                print(f"[/api/play] Dub unavailable for '{title}' Ep {episode}. Automatically falling back to Sub...")
+                PLAYBACK_SESSION["message"] = f"Dub unavailable for {title}. Switching to Sub..."
+                sub_res = await _run_playback_attempt(use_dub=False)
+                if sub_res["success"]:
+                    return {
+                        "status": "playing",
+                        "message": sub_res["message"],
+                        "fallback_to_sub": True
+                    }
+                res = sub_res
+
+        if not res["success"]:
+            clean_err = clean_ani_cli_error(res.get("raw_error", ""))
             PLAYBACK_SESSION["status"] = "error"
-            PLAYBACK_SESSION["message"] = err[-200:]
-            if "No results found" in err or "Invalid episode" in err:
-                raise HTTPException(status_code=404, detail="Could not find this anime or episode on ani-cli.")
-            raise HTTPException(status_code=500, detail=f"ani-cli failed: {err[-200:]}")
-            
-        return {"status": "playing", "message": f"Launching player for {title} Episode {episode}"}
+            PLAYBACK_SESSION["message"] = clean_err
+            status_code = 404 if "Could not find" in clean_err or "out of range" in clean_err else 500
+            raise HTTPException(status_code=status_code, detail=clean_err)
+
+        return {
+            "status": "playing",
+            "message": res["message"],
+            "fallback_to_sub": res.get("fallback_to_sub", False)
+        }
     except HTTPException:
         raise
     except Exception as e:

@@ -3,6 +3,21 @@ import { Sparkles, Music, BookOpen, Star, Search, Image as ImageIcon, Home, Libr
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import './index.css'
 
+export const THEMES = [
+  { id: 'crimson', name: 'Cerulean & Neon Rose', primary: '#00A3FF', secondary: '#FF2A85', bg: '#07080B' },
+] as const;
+export type ThemeId = typeof THEMES[number]['id'];
+
+export const THEME_CHART_COLORS: Record<string, string[]> = {
+  crimson: ['#00A3FF', '#38BDF8', '#FF2A85', '#0284C7', '#7DD3FC', '#FF66AA', '#0369A1', '#D60058'],
+};
+
+export const getTasteBadgeTierClass = (pct: number) => {
+  if (pct >= 85) return 'tier-high';
+  if (pct >= 70) return 'tier-mid';
+  return 'tier-subtle';
+};
+
 const getInitialApiBase = () => {
   if (typeof window !== 'undefined') {
     const w = window as any;
@@ -146,6 +161,14 @@ function App() {
   const [isSidebarExpanded, setIsSidebarExpanded] = useState(false)
   const [userName, setUserName] = useState<string>(localStorage.getItem('kyorenzu_username') || '')
   const [episodePage, setEpisodePage] = useState(0)
+
+  // Theme State & Persistence (Locked to 3-Color Palette)
+  const [theme] = useState<ThemeId>('crimson');
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('kyorenzu_theme', theme);
+  }, [theme]);
 
   // Notifications State
   const [notifications, setNotifications] = useState<any[]>([])
@@ -643,6 +666,20 @@ function App() {
     }
   }
 
+  const cleanErrorMessage = (msg: string | null | undefined): string => {
+    if (!msg) return 'Playback error occurred';
+    return msg
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+      .replace(/\x1b\[[0-9:;<=>?]*[ -/]*[@-~]/g, '')
+      .replace(/\x1b[0-9A-Za-z#%()=<>?@]/g, '')
+      .replace(/\[[0-9;]*[a-zA-Z]/g, '')
+      .replace(/Checking dependencies\.{0,3}/gi, '')
+      .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
+      .replace(/^\s*\d+\s*/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  };
+
   const playEpisode = async (title: string, alt_title: string | null, episode: number, mal_id?: number) => {
     setToastMessage(`Searching provider for ${title} Ep ${episode}...`);
     try {
@@ -650,7 +687,11 @@ function App() {
       const response = await fetch(`${API_BASE}/api/play?title=${encodeURIComponent(title)}&alt_title=${alt_title ? encodeURIComponent(alt_title) : ''}&episode=${episode}&dub=${isDub}&quality=${quality}&provider=${provider}${targetMalId ? `&mal_id=${targetMalId}` : ''}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Failed to launch");
-      setToastMessage(data.message || `Launching player for ${title} Ep ${episode}...`);
+      if (data.fallback_to_sub) {
+        setToastMessage(`Dub unavailable for this title. Playing in Sub (Ep ${episode})`);
+      } else {
+        setToastMessage(data.message || `Launching player for ${title} Ep ${episode}...`);
+      }
 
       let pollCount = 0;
       const pollTimer = setInterval(async () => {
@@ -665,13 +706,13 @@ function App() {
           if (res.ok) {
             const statusData = await res.json();
             if (statusData.status === 'playing') {
-              setToastMessage(`Now playing: ${title} Ep ${episode}`);
+              setToastMessage(statusData.message || `Now playing: ${title} Ep ${episode}`);
               clearInterval(pollTimer);
-              setTimeout(() => setToastMessage(null), 3000);
+              setTimeout(() => setToastMessage(null), 4000);
             } else if (statusData.status === 'error') {
               clearInterval(pollTimer);
               setToastMessage(null);
-              setErrorMessage(statusData.message || "Playback error occurred");
+              setErrorMessage(cleanErrorMessage(statusData.message || "Playback error occurred"));
             } else if (statusData.message) {
               setToastMessage(statusData.message);
             }
@@ -682,7 +723,7 @@ function App() {
       }, 1000);
     } catch (err: any) {
       setToastMessage(null);
-      setErrorMessage(err.message || "An unknown error occurred while launching the player.");
+      setErrorMessage(cleanErrorMessage(err.message || "An unknown error occurred while launching the player."));
     }
   }
 
@@ -916,7 +957,7 @@ function App() {
       .sort((a, b) => b.value - a.value)
       .slice(0, 8);
 
-    const COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#d946ef'];
+    const activeThemeChartColors = THEME_CHART_COLORS[theme] || THEME_CHART_COLORS.crimson;
 
     const scoreCounts: Record<number, number> = { 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:0, 8:0, 9:0, 10:0 };
     userLibrary.forEach(item => {
@@ -968,13 +1009,13 @@ function App() {
               <span className="stats-metric-value" style={{ fontSize: '1rem', marginTop: '2px' }}>
                 {libraryInsights?.global_delta !== undefined ? (
                   <>
-                    <span style={{ color: libraryInsights.global_delta >= 0 ? '#4ade80' : '#f87171', fontWeight: 'bold' }}>
+                    <span style={{ color: libraryInsights.global_delta >= 0 ? 'var(--accent-primary)' : 'var(--accent-secondary)', fontWeight: 'bold' }}>
                       {libraryInsights.global_delta >= 0 ? '+' : ''}{libraryInsights.global_delta.toFixed(2)}
                     </span>
                     <span className="critic-badge" style={{
                       display: 'block',
-                      background: libraryInsights.global_delta >= 0 ? 'rgba(74, 222, 128, 0.15)' : 'rgba(248, 113, 113, 0.15)',
-                      color: libraryInsights.global_delta >= 0 ? '#4ade80' : '#f87171'
+                      background: libraryInsights.global_delta >= 0 ? 'rgba(0, 163, 255, 0.16)' : 'rgba(255, 42, 133, 0.16)',
+                      color: libraryInsights.global_delta >= 0 ? 'var(--accent-primary-hover)' : 'var(--accent-secondary)'
                     }}>
                       {libraryInsights.critic_label || (libraryInsights.global_delta < -0.3 ? 'Strict Critic' : 'Enthusiast')}
                     </span>
@@ -992,10 +1033,10 @@ function App() {
                   <PieChart>
                     <Pie data={genreData} cx="50%" cy="50%" innerRadius={55} outerRadius={75} paddingAngle={5} dataKey="value">
                       {genreData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                        <Cell key={`cell-${index}`} fill={activeThemeChartColors[index % activeThemeChartColors.length]} />
                       ))}
                     </Pie>
-                    <Tooltip contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border-color)', borderRadius: '8px', color: 'white' }} />
+                    <Tooltip contentStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-highlight)', borderRadius: '8px', color: 'var(--text-primary)', boxShadow: 'var(--shadow-elevated)' }} />
                   </PieChart>
                 </ResponsiveContainer>
               </div>
@@ -1008,7 +1049,7 @@ function App() {
                   <BarChart data={scoreData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                     <XAxis dataKey="score" stroke="var(--text-secondary)" fontSize={12} tickLine={false} axisLine={false} />
                     <YAxis stroke="var(--text-secondary)" fontSize={12} tickLine={false} axisLine={false} allowDecimals={false} />
-                    <Tooltip cursor={{ fill: 'rgba(255,255,255,0.05)' }} contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border-color)', borderRadius: '8px', color: 'white' }} />
+                    <Tooltip cursor={{ fill: 'rgba(255,255,255,0.05)' }} contentStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-highlight)', borderRadius: '8px', color: 'var(--text-primary)', boxShadow: 'var(--shadow-elevated)' }} />
                     <Bar dataKey="count" fill="var(--accent-primary)" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
@@ -1023,8 +1064,8 @@ function App() {
                     <BarChart data={libraryInsights.era_distribution} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                       <XAxis dataKey="era" stroke="var(--text-secondary)" fontSize={12} tickLine={false} axisLine={false} />
                       <YAxis stroke="var(--text-secondary)" fontSize={12} tickLine={false} axisLine={false} allowDecimals={false} />
-                      <Tooltip cursor={{ fill: 'rgba(255,255,255,0.05)' }} contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border-color)', borderRadius: '8px', color: 'white' }} />
-                      <Bar dataKey="count" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
+                      <Tooltip cursor={{ fill: 'rgba(255,255,255,0.05)' }} contentStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-highlight)', borderRadius: '8px', color: 'var(--text-primary)', boxShadow: 'var(--shadow-elevated)' }} />
+                      <Bar dataKey="count" fill="var(--accent-secondary)" radius={[4, 4, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -1036,7 +1077,7 @@ function App() {
           {libraryInsights?.plan_to_watch_ranked && libraryInsights.plan_to_watch_ranked.length > 0 && (
             <div style={{ marginTop: '20px', borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-                <Sparkles size={18} color="#c084fc" />
+                <Sparkles size={18} color="var(--accent-ai)" />
                 <h3 style={{ margin: 0, color: 'white', fontSize: '1.05rem' }}>Smart Backlog Spotlight — Highest AI Taste Resonance</h3>
               </div>
               <div className="backlog-spotlight-container">
@@ -1051,8 +1092,10 @@ function App() {
                       <div style={{ color: 'white', fontWeight: 600, fontSize: '0.85rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={item.title}>
                         {item.title}
                       </div>
-                      <div style={{ color: '#c084fc', fontSize: '0.75rem', fontWeight: 700, marginTop: '2px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <Sparkles size={11} /> {item.taste_match_pct}% Match
+                      <div style={{ marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <span className={`taste-badge ${getTasteBadgeTierClass(item.taste_match_pct || 0)}`}>
+                          <Sparkles size={11} /> {item.taste_match_pct}% Match
+                        </span>
                       </div>
                       <button 
                         className="library-play-btn" 
@@ -1120,8 +1163,63 @@ function App() {
             <div className="menu-toggler" onClick={() => setIsSidebarExpanded(!isSidebarExpanded)}>
               <Menu size={24} />
             </div>
-            <div className="brand" onClick={() => setActiveTab('home')}>
-              <span style={{ color: 'white' }}>Kyō</span><span style={{ color: 'var(--accent-primary)' }}>Renzu</span>
+            <div className="brand" onClick={() => setActiveTab('home')} style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+              <div 
+                className="brand-logo-circle"
+                style={{
+                  width: '32px',
+                  height: '32px',
+                  minWidth: '32px',
+                  minHeight: '32px',
+                  borderRadius: '50%',
+                  aspectRatio: '1 / 1',
+                  background: 'linear-gradient(135deg, #00A3FF 0%, #FF2A85 100%)',
+                  padding: '2px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexShrink: 0,
+                  boxShadow: '0 0 14px rgba(0, 163, 255, 0.45), 0 0 6px rgba(255, 42, 133, 0.35)',
+                }}
+              >
+                <div style={{
+                  width: '100%',
+                  height: '100%',
+                  borderRadius: '50%',
+                  background: '#07080B',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="12" cy="12" r="9" stroke="url(#brand_logo_grad)" strokeWidth="2" strokeDasharray="13 4" />
+                    <circle cx="12" cy="12" r="4" fill="url(#brand_logo_grad)" />
+                    <defs>
+                      <linearGradient id="brand_logo_grad" x1="3" y1="3" x2="21" y2="21" gradientUnits="userSpaceOnUse">
+                        <stop stopColor="#00A3FF" />
+                        <stop offset="1" stopColor="#FF2A85" />
+                      </linearGradient>
+                    </defs>
+                  </svg>
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '2px', letterSpacing: '-0.3px', userSelect: 'none' }}>
+                <span style={{ color: '#FFFFFF', fontWeight: 900, fontSize: '1.45rem', fontFamily: "'Nunito', sans-serif" }}>Kyō</span>
+                <span style={{ color: '#00A3FF', fontWeight: 900, fontSize: '1.45rem', fontFamily: "'Nunito', sans-serif" }}>Renzu</span>
+                <span style={{ 
+                  display: 'inline-block',
+                  width: '6px', 
+                  height: '6px', 
+                  minWidth: '6px',
+                  minHeight: '6px',
+                  borderRadius: '50%', 
+                  background: '#FF2A85', 
+                  marginLeft: '3px',
+                  marginBottom: '2px',
+                  boxShadow: '0 0 8px #FF2A85',
+                  flexShrink: 0
+                }} />
+              </div>
             </div>
             <nav className="header-nav">
               <span className={`nav-link ${activeTab === 'home' ? 'active' : ''}`} onClick={() => setActiveTab('home')}>Home</span>
@@ -1161,17 +1259,17 @@ function App() {
                 cursor: 'pointer',
                 padding: '4px 10px',
                 borderRadius: '8px',
-                background: isSyncingOta ? 'rgba(99, 102, 241, 0.18)' : 'rgba(255, 255, 255, 0.05)',
-                border: isSyncingOta ? '1px solid rgba(129, 140, 248, 0.5)' : '1px solid rgba(255, 255, 255, 0.1)',
+                background: isSyncingOta ? 'rgba(0, 163, 255, 0.18)' : 'var(--bg-glass-subtle)',
+                border: isSyncingOta ? '1px solid var(--accent-primary)' : '1px solid var(--border-specular)',
                 transition: 'all 0.2s ease',
                 marginRight: '4px'
               }}
             >
-              <RefreshCw size={14} className={isSyncingOta ? 'spin-animation' : ''} style={{ color: isSyncingOta ? '#818cf8' : '#888' }} />
+              <RefreshCw size={14} className={isSyncingOta ? 'spin-animation' : ''} style={{ color: isSyncingOta ? 'var(--accent-secondary)' : 'var(--text-muted)' }} />
               <span style={{
                 fontSize: '0.75rem',
                 fontWeight: 500,
-                color: isSyncingOta ? '#c7d2fe' : '#888',
+                color: isSyncingOta ? 'var(--text-primary)' : 'var(--text-secondary)',
                 maxWidth: isSyncingOta ? '180px' : '65px',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
@@ -1194,13 +1292,13 @@ function App() {
                 <div className="notification-dropdown" onClick={e => e.stopPropagation()}>
                   <div className="notification-dropdown-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span>Notifications</span>
-                    <button
+                    <button 
                       onClick={(e) => { e.stopPropagation(); triggerOtaSync(); }}
                       disabled={isSyncingOta}
                       style={{
-                        background: 'rgba(99, 102, 241, 0.2)',
-                        border: '1px solid rgba(99, 102, 241, 0.4)',
-                        color: '#a5b4fc',
+                        background: 'rgba(0, 163, 255, 0.18)',
+                        border: '1px solid var(--accent-primary)',
+                        color: '#FFFFFF',
                         padding: '2px 8px',
                         borderRadius: '4px',
                         fontSize: '0.72rem',
@@ -1282,6 +1380,13 @@ function App() {
                 {/* Hero Banner */}
                 {heroAnimes.length > 0 && (
                   <div className="hero-banner">
+                    {/* Atmospheric Dynamic Ambilight Cover Glow */}
+                    <div 
+                      className="hero-ambilight-glow"
+                      style={{
+                        backgroundImage: `url(${resolveMediaUrl(heroAnimes[currentHeroIndex]?.cover_url || heroAnimes[currentHeroIndex]?.banner_url) || './no_image_cover.jpg'})`
+                      }}
+                    />
                     {heroAnimes.map((hero: any, idx: number) => (
                       <div key={idx} className={`hero-slide ${idx === currentHeroIndex ? 'active' : ''}`}>
                         {hero.banner_url ? (
@@ -1395,7 +1500,7 @@ function App() {
                       {(categories[topAnimeTab === 'Day' ? 0 : topAnimeTab === 'Week' ? 1 : 2]?.anime || []).slice(0, 18).map((anime: any, idx: number) => (
                         <div key={`top-${idx}`} className="anikoto-card" onClick={() => setSelectedAnime(anime)}>
                           <div className="poster-container">
-                            <div className="rank-badge" style={{ position: 'absolute', top: 0, left: 0, background: 'var(--accent-primary)', color: 'black', fontWeight: 'bold', width: '30px', height: '30px', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10, borderBottomRightRadius: '8px', fontSize: '1rem' }}>{idx + 1}</div>
+                            <div className="rank-badge" style={{ position: 'absolute', top: 0, left: 0, background: 'var(--accent-primary)', color: '#ffffff', fontWeight: 'bold', width: '30px', height: '30px', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10, borderBottomRightRadius: '8px', fontSize: '1rem' }}>{idx + 1}</div>
                             {anime.cover_url ? (
                               <img src={resolveMediaUrl(anime.cover_url)} alt={anime.title} loading="lazy" />
                             ) : (
@@ -1587,7 +1692,7 @@ function App() {
                   {results.map((anime, idx) => (
                     <div key={idx} className="anikoto-card" onClick={() => setSelectedAnime(anime)}>
                       <div className="poster-container">
-                        <div className="rank-badge" style={{ position: 'absolute', top: 0, left: 0, background: 'var(--accent-primary)', color: 'black', fontWeight: 'bold', padding: '4px 8px', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10, borderBottomRightRadius: '8px', fontSize: '0.9rem' }}>#{anime.rank}</div>
+                        <div className="rank-badge" style={{ position: 'absolute', top: 0, left: 0, background: 'var(--accent-primary)', color: '#ffffff', fontWeight: 'bold', padding: '4px 8px', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10, borderBottomRightRadius: '8px', fontSize: '0.9rem' }}>#{anime.rank}</div>
                         
                         {anime.cover_url ? (
                           <img src={resolveMediaUrl(anime.cover_url)} alt={anime.title} loading="lazy" />
@@ -1610,7 +1715,7 @@ function App() {
                             <span>{anime.episodes === 1 ? 'Movie' : (anime.episodes ? `${anime.episodes} EPS` : '? EPS')}</span>
                           </div>
                           {anime.similarity !== undefined && anime.similarity !== null && (
-                            <div style={{fontSize: '0.85rem', color: '#10b981', marginBottom: '16px', fontWeight: 700}}>
+                            <div style={{fontSize: '0.85rem', color: 'var(--accent-primary)', marginBottom: '16px', fontWeight: 700}}>
                               {Math.round(anime.similarity * 100)}% Visual Match
                             </div>
                           )}
@@ -1635,8 +1740,38 @@ function App() {
           <div className="user-library-page">
             {/* Profile Header */}
             <div className="profile-header">
-              <div className="profile-avatar">
-                <img src={`https://ui-avatars.com/api/?name=${userName || 'Guest'}&background=2b2d31&color=fff&size=100`} alt={userName || 'Guest'} />
+              <div 
+                className="profile-avatar"
+                style={{
+                  width: '96px',
+                  height: '96px',
+                  minWidth: '96px',
+                  minHeight: '96px',
+                  maxWidth: '96px',
+                  maxHeight: '96px',
+                  borderRadius: '50%',
+                  aspectRatio: '1 / 1',
+                  flexShrink: 0,
+                  overflow: 'hidden',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: 'linear-gradient(135deg, rgba(0, 163, 255, 0.25) 0%, rgba(255, 42, 133, 0.25) 100%)',
+                  border: '2px solid var(--accent-primary)',
+                  boxShadow: '0 0 0 4px rgba(0, 163, 255, 0.15), 0 0 24px rgba(0, 163, 255, 0.35)',
+                }}
+              >
+                <img 
+                  src={`https://ui-avatars.com/api/?name=${encodeURIComponent(userName || 'Guest')}&background=00A3FF&color=fff&size=128&bold=true&rounded=true`} 
+                  alt={userName || 'Guest'} 
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    borderRadius: '50%',
+                    objectFit: 'cover',
+                    display: 'block'
+                  }}
+                />
               </div>
               <div className="profile-info">
                 <h1 className="profile-name">{userName || 'Guest'}</h1>
@@ -1666,11 +1801,11 @@ function App() {
                     setIsBatchMode(!isBatchMode);
                     if (isBatchMode) setSelectedMalIds([]);
                   }}
-                  style={isBatchMode ? { background: 'rgba(99, 102, 241, 0.3)', borderColor: 'var(--accent-primary)', color: 'white' } : {}}
+                  style={isBatchMode ? { background: 'rgba(0, 163, 255, 0.22)', borderColor: 'var(--accent-primary)', color: 'white' } : {}}
                 >
                   <CheckSquare size={16} style={{marginRight:'6px'}} /> {isBatchMode ? 'Exit Batch' : 'Batch Edit'}
                 </button>
-                <button className="btn-secondary" onClick={() => setShowStatsModal(true)} style={{ background: 'var(--accent-primary)', borderColor: 'var(--accent-primary)', color: 'white' }}>
+                <button className="btn-secondary" onClick={() => setShowStatsModal(true)}>
                   <BarChart2 size={16} style={{marginRight:'6px'}} /> View Stats
                 </button>
                 <button className="btn-secondary" onClick={() => window.location.href = `${API_BASE}/api/library/export?format=csv`}>
@@ -1754,10 +1889,10 @@ function App() {
               
               <button 
                 className={`filter-btn ${libraryFavoritesOnly ? 'active' : ''}`}
-                style={libraryFavoritesOnly ? { background: 'rgba(251, 191, 36, 0.25)', borderColor: '#fbbf24', color: '#fbbf24' } : {}}
+                style={libraryFavoritesOnly ? { background: 'rgba(255, 45, 149, 0.22)', borderColor: '#FF2D95', color: '#FF2D95' } : {}}
                 onClick={() => setLibraryFavoritesOnly(!libraryFavoritesOnly)}
               >
-                <Star size={14} fill={libraryFavoritesOnly ? '#fbbf24' : 'none'} style={{ marginRight: '6px' }} />
+                <Star size={14} fill={libraryFavoritesOnly ? '#FF2D95' : 'none'} style={{ marginRight: '6px' }} />
                 Favorites Only
               </button>
 
@@ -1962,7 +2097,7 @@ function App() {
                                 setSelectedAnime(item);
                               }
                             }}
-                            style={isSelected ? { outline: '2px solid var(--accent-primary)', background: 'rgba(99, 102, 241, 0.08)' } : {}}
+                            style={isSelected ? { outline: '2px solid var(--accent-primary)', background: 'rgba(0, 163, 255, 0.16)' } : {}}
                           >
                             {isBatchMode && (
                               <div 
@@ -1975,8 +2110,22 @@ function App() {
                                 {isSelected && <Check size={14} color="white" />}
                               </div>
                             )}
-                            <div style={{ position: 'relative' }}>
-                              <img src={resolveMediaUrl(item.cover_url)} alt={item.title} className="library-item-cover" loading="lazy" decoding="async" />
+                            <div className="library-item-cover-wrapper">
+                              <div className="library-item-cover-placeholder">
+                                <ImageIcon size={20} opacity={0.35} />
+                              </div>
+                              {item.cover_url ? (
+                                <img 
+                                  src={resolveMediaUrl(item.cover_url)} 
+                                  alt="" 
+                                  className="library-item-cover" 
+                                  loading="lazy" 
+                                  decoding="async" 
+                                  onError={(e) => {
+                                    (e.currentTarget as HTMLElement).style.display = 'none';
+                                  }}
+                                />
+                              ) : null}
                               {item.status === 'Watching' && (
                                 <button 
                                   className="quick-add-btn" 
@@ -1995,7 +2144,7 @@ function App() {
                                 <h3 className="library-item-title">{item.title}</h3>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
                                   {item.taste_match_pct !== undefined && item.taste_match_pct > 0 && (
-                                    <span className="taste-badge" title="AI Taste Match">
+                                    <span className={`taste-badge ${getTasteBadgeTierClass(item.taste_match_pct)}`} title="AI Taste Match">
                                       <Sparkles size={11} /> {item.taste_match_pct}% Match
                                     </span>
                                   )}
@@ -2007,7 +2156,7 @@ function App() {
                                     }}
                                     title={item.is_favorite ? "Remove from favorites" : "Mark as favorite"}
                                   >
-                                    <Star size={14} fill={item.is_favorite ? '#fbbf24' : 'none'} color={item.is_favorite ? '#fbbf24' : 'currentColor'} />
+                                    <Star size={14} fill={item.is_favorite ? '#FF2D95' : 'none'} color={item.is_favorite ? '#FF2D95' : 'currentColor'} />
                                   </button>
                                   <button 
                                     className="library-play-btn"
@@ -2029,7 +2178,7 @@ function App() {
                                 {item.unwatched_aired_episodes !== undefined && item.unwatched_aired_episodes > 0 && item.status === 'Watching' && (
                                   <>
                                     <span className="meta-divider">•</span>
-                                    <span style={{ color: '#38bdf8', fontWeight: 600 }}>{item.unwatched_aired_episodes} new ep{item.unwatched_aired_episodes > 1 ? 's' : ''}</span>
+                                    <span style={{ color: '#0096C7', fontWeight: 600 }}>{item.unwatched_aired_episodes} new ep{item.unwatched_aired_episodes > 1 ? 's' : ''}</span>
                                   </>
                                 )}
                                 {item.score > 0 && (
@@ -2075,19 +2224,27 @@ function App() {
                                   {isSelected && <Check size={14} color="white" />}
                                 </div>
                               )}
+                              <div className="anime-card-placeholder" style={{ position: 'absolute', inset: 0, zIndex: 0 }}>
+                                <ImageIcon size={32} opacity={0.35} />
+                              </div>
                               {item.cover_url ? (
-                                <img src={resolveMediaUrl(item.cover_url)} alt={item.title} loading="lazy" decoding="async" />
-                              ) : (
-                                <div className="anime-card-placeholder">
-                                  <ImageIcon size={32} />
-                                </div>
-                              )}
+                                <img 
+                                  src={resolveMediaUrl(item.cover_url)} 
+                                  alt="" 
+                                  loading="lazy" 
+                                  decoding="async" 
+                                  style={{ position: 'relative', zIndex: 1 }}
+                                  onError={(e) => {
+                                    (e.currentTarget as HTMLElement).style.display = 'none';
+                                  }}
+                                />
+                              ) : null}
                               <div className="ep-status-overlay">
                                 <span className="ep-sub" style={{ background: 'rgba(0,0,0,0.7)', padding: '2px 6px', borderRadius: '4px' }}>
                                   <Type size={10} style={{marginRight: '2px'}}/>{item.episodes_watched} / {item.total_episodes || '?'}
                                 </span>
                                 {item.taste_match_pct !== undefined && item.taste_match_pct > 0 && (
-                                  <span className="taste-badge" style={{ marginLeft: '4px' }}>
+                                  <span className={`taste-badge ${getTasteBadgeTierClass(item.taste_match_pct)}`} style={{ marginLeft: '4px' }}>
                                     <Sparkles size={9} /> {item.taste_match_pct}%
                                   </span>
                                 )}
@@ -2101,7 +2258,7 @@ function App() {
                                 }}
                                 title={item.is_favorite ? "Remove from favorites" : "Mark as favorite"}
                               >
-                                <Star size={13} fill={item.is_favorite ? '#fbbf24' : 'none'} color={item.is_favorite ? '#fbbf24' : 'currentColor'} />
+                                <Star size={13} fill={item.is_favorite ? '#FF2D95' : 'none'} color={item.is_favorite ? '#FF2D95' : 'currentColor'} />
                               </button>
                               {item.status === 'Watching' && (
                                 <button 
@@ -2150,7 +2307,7 @@ function App() {
                                   <Play size={10} fill="currentColor" /> Ep {nextEp}
                                 </button>
                                 {item.unwatched_aired_episodes !== undefined && item.unwatched_aired_episodes > 0 && (
-                                  <span style={{ fontSize: '0.7rem', color: '#38bdf8', fontWeight: 600 }}>
+                                  <span style={{ fontSize: '0.7rem', color: '#0096C7', fontWeight: 600 }}>
                                     +{item.unwatched_aired_episodes} new
                                   </span>
                                 )}
@@ -2190,7 +2347,7 @@ function App() {
                         Plan to Watch
                       </button>
                       <button className="batch-btn" onClick={() => handleBatchAction('favorite', 1)} title="Star Selected">
-                        <Star size={13} fill="#fbbf24" color="#fbbf24" /> Star
+                        <Star size={13} fill="#FF2D95" color="#FF2D95" /> Star
                       </button>
                       <button className="batch-btn danger" onClick={() => {
                         if (confirm(`Delete ${selectedMalIds.length} items from your library?`)) {
@@ -2409,7 +2566,7 @@ function App() {
                             <span>{anime.episodes === 1 ? 'Movie' : (anime.episodes ? `${anime.episodes} EPS` : '? EPS')}</span>
                           </div>
                           {anime.score && (
-                            <div style={{fontSize: '0.85rem', color: '#fbbf24', marginBottom: '16px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px'}}>
+                            <div style={{fontSize: '0.85rem', color: '#FF2D95', marginBottom: '16px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px'}}>
                               <Star size={12} fill="currentColor" /> {anime.score.toFixed(1)} Score
                             </div>
                           )}
@@ -2449,6 +2606,13 @@ function App() {
         {/* DETAILS MODAL */}
         {selectedAnime && (
           <div className="modal-backdrop" onClick={() => setSelectedAnime(null)}>
+            {/* Atmospheric Dynamic Ambilight Cover Glow */}
+            <div 
+              className="modal-ambient-glow"
+              style={{
+                backgroundImage: `url(${resolveMediaUrl(selectedAnime.cover_url) || './no_image_cover.jpg'})`
+              }}
+            />
             <div className="anikoto-details-modal" onClick={e => e.stopPropagation()}>
               <div 
                 className="anikoto-modal-banner" 
@@ -2506,7 +2670,7 @@ function App() {
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--accent-primary)', fontSize: '0.9rem', fontWeight: 'bold' }}>
                             <Library size={16} /> In Your Library
                             {libItem.taste_match_pct !== undefined && libItem.taste_match_pct > 0 && (
-                              <span className="taste-badge" style={{ marginLeft: '4px' }}>
+                              <span className={`taste-badge ${getTasteBadgeTierClass(libItem.taste_match_pct)}`} style={{ marginLeft: '4px' }}>
                                 <Sparkles size={11} /> {libItem.taste_match_pct}% Match
                               </span>
                             )}
@@ -2517,9 +2681,9 @@ function App() {
                               style={{ 
                                 padding: '4px 8px', 
                                 fontSize: '0.75rem', 
-                                background: libItem.is_favorite ? 'rgba(251, 191, 36, 0.2)' : 'rgba(255, 255, 255, 0.05)', 
-                                color: libItem.is_favorite ? '#fbbf24' : 'var(--text-secondary)', 
-                                border: '1px solid ' + (libItem.is_favorite ? '#fbbf24' : 'var(--border-color)'), 
+                                background: libItem.is_favorite ? 'rgba(255, 45, 149, 0.22)' : 'rgba(255, 255, 255, 0.05)', 
+                                color: libItem.is_favorite ? '#FF2D95' : 'var(--text-secondary)', 
+                                border: '1px solid ' + (libItem.is_favorite ? '#FF2D95' : 'var(--border-color)'), 
                                 borderRadius: '4px', 
                                 cursor: 'pointer',
                                 display: 'flex',
@@ -2527,7 +2691,7 @@ function App() {
                                 gap: '4px'
                               }}
                             >
-                              <Star size={12} fill={libItem.is_favorite ? '#fbbf24' : 'none'} color={libItem.is_favorite ? '#fbbf24' : 'currentColor'} />
+                              <Star size={12} fill={libItem.is_favorite ? '#FF2D95' : 'none'} color={libItem.is_favorite ? '#FF2D95' : 'currentColor'} />
                               {libItem.is_favorite ? 'Favorited' : 'Favorite'}
                             </button>
                             <button 
@@ -2832,7 +2996,7 @@ function App() {
             </div>
             <h2 style={{fontSize: '1.5rem', fontWeight: '700', marginBottom: '12px', color: '#f8fafc'}}>Playback Error</h2>
             <p style={{fontSize: '1.05rem', color: 'var(--text-secondary)', lineHeight: '1.6', marginBottom: '28px'}}>
-              {errorMessage}
+              {cleanErrorMessage(errorMessage)}
             </p>
             <button 
               className="btn-primary" 
