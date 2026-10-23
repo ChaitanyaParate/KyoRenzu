@@ -908,11 +908,13 @@ class Recommendation(NamedTuple):
     plot_similarity: float | None
     audio_similarity: float | None
     final_score: float
+    visual_similarity: float | None = None
+    match_reason: str | None = None
 
 
 # ── Main recommender function ─────────────────────────────────────────────────
 def recommend(
-    liked_anime: list[AnimeEntry],
+    liked_anime: list[AnimeEntry] | None = None,
     preference_text_embed: np.ndarray | None = None,
     plot_preference_text: str | None = None,
     audio_preference_text: str | None = None,
@@ -920,68 +922,75 @@ def recommend(
     era_year: int | None = None,
     top_n: int = 6,
     n_candidates: int = 150,
+    visual_weight: float = 0.50,
+    plot_weight: float = 0.35,
+    audio_weight: float = 0.15,
+    diversity_lambda: float = 0.68,
+    negative_anime: list[AnimeEntry] | None = None,
+    exclude_mal_ids: set[int] | list[int] | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    min_score: float | None = None,
+    formats: list[str] | None = None,
+    genres_include: list[str] | None = None,
+    genres_exclude: list[str] | None = None,
 ) -> list[Recommendation]:
     """
-    Produce top-N anime recommendations.
-
-    Args:
-        liked_anime: List of AnimeEntry objects from input_parser
-        preference_text_embed: 512-d CLIP text embedding of preference string
-        genre_filter: Set of MAL genre names to soft-filter by
-        era_year: Optional override for the target release year (from preference text
-                  e.g. "classic" → 1995, "new" → current year).  When None, the
-                  preferred era is inferred from the median year of liked anime.
-        top_n: Number of final recommendations to return
-        n_candidates: Number of visual candidates to retrieve before re-ranking
+    Produce top-N anime recommendations. Supports seedless pure-prompt queries,
+    pure-seed queries, or hybrid multimodal queries with hard metadata filters.
     """
     _load_index()
     anime_db = _load_anime_db()
 
     # ── 1. Build liked anime embeddings ───────────────────────────────────────
     liked_vecs = []
-    for entry in liked_anime:
-        vec = _get_embedding_for_entry(entry)
-        if vec is not None:
-            liked_vecs.append(vec)
-
-    if not liked_vecs:
-        raise ValueError("Could not obtain embeddings for any liked anime. "
-                         "Check that cover images exist and embed_covers.py has been run.")
+    if liked_anime:
+        for entry in liked_anime:
+            vec = _get_embedding_for_entry(entry)
+            if vec is not None:
+                liked_vecs.append(vec)
 
     # ── 2. User taste vector (weighted by Worth Level if available) ───────────
-    weights = np.array([entry.weight for entry in liked_anime
-                        if _get_embedding_for_entry(entry) is not None], dtype=np.float32)
-    # Re-collect only entries that produced valid embeddings
-    valid_entries = [entry for entry in liked_anime
-                    if _get_embedding_for_entry(entry) is not None]
-    valid_weights = np.array([e.weight for e in valid_entries], dtype=np.float32)
+    taste_vec = None
+    if liked_vecs:
+        valid_entries = [entry for entry in liked_anime
+                         if _get_embedding_for_entry(entry) is not None]
+        valid_weights = np.array([e.weight for e in valid_entries], dtype=np.float32)
 
-    if valid_weights.sum() == 0:
-        valid_weights = np.ones(len(liked_vecs), dtype=np.float32)
+        if valid_weights.sum() == 0:
+            valid_weights = np.ones(len(liked_vecs), dtype=np.float32)
 
-    if len(set(valid_weights.tolist())) == 1:
-        # All weights equal — use simple mean (faster)
-        taste_vec = np.mean(liked_vecs, axis=0)
-    else:
-        # Weighted mean: High-worth anime dominate the query vector
-        taste_vec = np.average(liked_vecs, axis=0, weights=valid_weights)
-        n_high = int((valid_weights > 1.0).sum())
-        n_low  = int((valid_weights < 1.0).sum())
-        print(f"  [recommender] Weighted query: {n_high} High, "
-              f"{len(liked_vecs)-n_high-n_low} Medium, {n_low} Low entries")
-    taste_vec = taste_vec / (np.linalg.norm(taste_vec) + 1e-9)  # re-normalise
+        if len(set(valid_weights.tolist())) == 1:
+            taste_vec = np.mean(liked_vecs, axis=0)
+        else:
+            taste_vec = np.average(liked_vecs, axis=0, weights=valid_weights)
+            n_high = int((valid_weights > 1.0).sum())
+            n_low  = int((valid_weights < 1.0).sum())
+            print(f"  [recommender] Weighted query: {n_high} High, "
+                  f"{len(liked_vecs)-n_high-n_low} Medium, {n_low} Low entries")
+        taste_vec = taste_vec / (np.linalg.norm(taste_vec) + 1e-9)
 
-    # ── 3. Blend with preference text embedding ───────────────────────────────
-    if preference_text_embed is not None:
+    # ── 3. Blend with preference text embedding & repulsor vector ─────────────
+    if taste_vec is not None and preference_text_embed is not None:
         query_vec = W_VISUAL * taste_vec + W_TEXT * preference_text_embed
         query_vec = query_vec / (np.linalg.norm(query_vec) + 1e-9)
-    else:
+    elif preference_text_embed is not None:
+        query_vec = preference_text_embed / (np.linalg.norm(preference_text_embed) + 1e-9)
+    elif taste_vec is not None:
         query_vec = taste_vec
+    else:
+        query_vec = None
+
+    if negative_anime and query_vec is not None:
+        neg_vecs = [_get_embedding_for_entry(entry) for entry in negative_anime if _get_embedding_for_entry(entry) is not None]
+        if neg_vecs:
+            repulsor_vec = np.mean(neg_vecs, axis=0)
+            repulsor_vec = repulsor_vec / (np.linalg.norm(repulsor_vec) + 1e-9)
+            query_vec = query_vec - 0.65 * repulsor_vec
+            query_vec = query_vec / (np.linalg.norm(query_vec) + 1e-9)
 
     # ── 3b. Infer preferred era from watched anime ────────────────────────────
-    # era_year override (from "classic"/"new" keywords) takes priority.
-    # Fallback: median year of the liked anime list (ignores entries with no year).
-    if era_year is None:
+    if era_year is None and liked_anime:
         liked_years = [
             anime_db[entry.mal_id]["year"]
             for entry in liked_anime
@@ -1000,8 +1009,11 @@ def recommend(
         print(f"  [recommender] Era preference: {preferred_year} "
               f"({'explicit override' if era_year else 'inferred from watchlist'})")
 
-    # ── 4. Cosine similarity over full index ──────────────────────────────────
-    sims = _cosine_sim(query_vec, _embeddings_matrix)  # [N]
+    # ── 4. Cosine similarity over full visual index ───────────────────────────
+    if query_vec is not None and _embeddings_matrix is not None:
+        sims = _cosine_sim(query_vec, _embeddings_matrix)
+    else:
+        sims = None
 
     # ── 4b. Plot similarity ───────────────────────────────────────────────────
     plot_sims = None
@@ -1025,14 +1037,12 @@ def recommend(
             with torch.no_grad():
                 text_features = c_model.get_text_features(**inputs)
                 if hasattr(text_features, "pooler_output"):
-                    # For CLAP, get_text_features returns BaseModelOutputWithPooling where pooler_output is the 512-dim projection
                     text_embeds = text_features.pooler_output
                 else:
                     text_embeds = text_features
             audio_query_vec = text_embeds[0].cpu().numpy()
             audio_query_vec = audio_query_vec / (np.linalg.norm(audio_query_vec) + 1e-9)
-        else:
-            # Build audio taste vector from liked anime
+        elif liked_anime:
             audio_liked_vecs = []
             for entry in liked_anime:
                 key = str(entry.mal_id)
@@ -1047,25 +1057,44 @@ def recommend(
             if len(audio_sims) > 0:
                 neutral_audio_sim = float(np.mean(audio_sims))
 
-    # ── 5. Get top candidates, excluding liked anime ──────────────────────────
-    liked_ids = {entry.mal_id for entry in liked_anime}
+    # ── 5. Multimodal Candidate Retrieval & Candidate Masking ─────────────────
+    liked_ids = set()
+    if liked_anime:
+        liked_ids.update(entry.mal_id for entry in liked_anime)
+    if negative_anime:
+        liked_ids.update(entry.mal_id for entry in negative_anime)
+    if exclude_mal_ids:
+        liked_ids.update(exclude_mal_ids)
     liked_row_idxs = {_index[str(mid)] for mid in liked_ids if str(mid) in _index}
 
-    # Mask out liked anime
-    masked_sims = sims.copy()
-    for row_idx in liked_row_idxs:
-        masked_sims[row_idx] = -999.0
+    n_items = len(_embeddings_matrix) if _embeddings_matrix is not None else 0
+    combined_scores = np.zeros(n_items, dtype=np.float32)
 
-    top_candidate_idxs = np.argsort(masked_sims)[::-1][:n_candidates]
+    if sims is not None:
+        combined_scores += visual_weight * sims
+    if plot_sims is not None and _synopsis_index:
+        for mid_str, s_idx in _synopsis_index.items():
+            ridx = _index.get(mid_str)
+            if ridx is not None:
+                combined_scores[ridx] += plot_weight * float(plot_sims[s_idx])
+    if audio_sims is not None and _audio_index:
+        for mid_str, a_idx in _audio_index.items():
+            ridx = _index.get(mid_str)
+            if ridx is not None:
+                combined_scores[ridx] += audio_weight * float(audio_sims[a_idx])
+
+    # Mask out excluded and liked anime
+    for row_idx in liked_row_idxs:
+        combined_scores[row_idx] = -999.0
+
+    top_candidate_idxs = np.argsort(combined_scores)[::-1][:n_candidates]
 
     # ── 5b. Genre-seeded candidate injection ──────────────────────────────────
-    # When a genre filter is active, actual genre-tagged anime may not appear in
-    # the top-N visual candidates (e.g., Josei anime look different from Shounen).
-    # Inject ALL passing anime that have the exact genre tag into the pool so they
-    # get a fair chance at ranking via their genre_relevance score.
     injected_idxs: set[int] = set()
-    if genre_filter and anime_db:
-        # Build set of row_idxs already in the visual candidate pool
+    if (genre_filter or genres_include) and anime_db:
+        active_genre_set = set(genre_filter or set())
+        if genres_include:
+            active_genre_set.update(g.strip() for g in genres_include if g.strip())
         existing_pool = set(top_candidate_idxs.tolist())
         for mid, info in anime_db.items():
             if mid in liked_ids:
@@ -1074,13 +1103,13 @@ def recommend(
                 continue
             if not info["genres"]:
                 continue
-            anime_tags = {g.strip() for g in info["genres"].split(",") if g.strip()}
-            if anime_tags & genre_filter:  # exact tag overlap
+            anime_tags = {g.strip().lower() for g in info["genres"].split(",") if g.strip()}
+            req_tags = {g.strip().lower() for g in active_genre_set}
+            if anime_tags & req_tags:
                 row_idx = _index.get(str(mid))
                 if row_idx is not None and row_idx not in existing_pool:
                     injected_idxs.add(row_idx)
 
-    # Merge: visual candidates + genre injections (order: visual first)
     all_candidate_idxs = list(top_candidate_idxs) + list(injected_idxs)
 
     # Shift indices if database schema magic header was altered
@@ -1099,34 +1128,65 @@ def recommend(
         _db_stats = (s_min, s_max - s_min + 1e-9, m_max + 1e-9)
     score_min, score_range, members_max = _db_stats
 
-    # ── 7. Re-rank with metadata ──────────────────────────────────────────────
+    # Format parsing helpers
+    format_filters = [f.upper() for f in formats] if formats else []
+    include_all_fmts = not format_filters or "ALL" in format_filters
+
+    # ── 7. Re-rank with metadata & hard filters ───────────────────────────────
     candidates = []
     for row_idx in all_candidate_idxs:
         mal_id = _reverse_index.get(row_idx)
         if mal_id is None or mal_id not in anime_db:
             continue
+        if mal_id in liked_ids:
+            continue
 
         info = anime_db[mal_id]
 
         # Hard filters
-        if info["score"] < MIN_SCORE:
+        effective_min_score = min_score if (min_score is not None and min_score > 0) else MIN_SCORE
+        if info["score"] < effective_min_score:
             continue
         if info["scored_by"] < MIN_SCORED_BY:
             continue
 
-        # Genre relevance: sum all genre correlations, normalize, apply threshold
-        #
-        # Two correlation directions depending on whether the requested genre is a
-        # demographic (Josei, Seinen, Shounen, Shoujo, Kids):
-        #
-        #  Regular genres  → P(anime_genre | req_genre)
-        #    "If I want Horror, how likely is this anime's genre to co-occur?"
-        #    e.g. corr[(Action, Horror)] = 0.285
-        #
-        #  Demographic genres → P(req_genre | anime_genre)   [REVERSED]
-        #    "Given this anime has Drama, how likely is it to be Josei?"
-        #    e.g. corr[(Josei, Drama)] = 0.013 → Toradora! scores ~0.036 → zeroed
-        #    Actual Josei anime: corr[(Josei, Josei)] = 1.0 → strong boost
+        cand_year = info.get("year")
+        if year_min is not None and cand_year is not None and cand_year < year_min:
+            continue
+        if year_max is not None and cand_year is not None and cand_year > year_max:
+            continue
+
+        # Format filter (TV, MOVIE, OVA)
+        if not include_all_fmts:
+            eps = info.get("episodes")
+            t_low = (info.get("title", "") + " " + info.get("title_english", "")).lower()
+            is_movie = (eps == 1 and "movie" in t_low) or "movie" in t_low or (eps == 1 and "special" not in t_low and "ova" not in t_low)
+            is_ova = "ova" in t_low or "special" in t_low or "ona" in t_low or (eps is not None and 1 < eps <= 6 and "movie" not in t_low)
+            is_tv = (eps is not None and eps > 1 and not is_ova and not is_movie) or (eps is None)
+
+            matched_fmt = False
+            if "TV" in format_filters and is_tv:
+                matched_fmt = True
+            if "MOVIE" in format_filters and is_movie:
+                matched_fmt = True
+            if "OVA" in format_filters and is_ova:
+                matched_fmt = True
+            if not matched_fmt:
+                continue
+
+        # Genres exclude filter
+        cand_genres = {g.strip().lower() for g in info["genres"].split(",") if g.strip()} if info.get("genres") else set()
+        if genres_exclude:
+            if any(ge.strip().lower() in cand_genres for ge in genres_exclude if ge.strip()):
+                continue
+
+        # Genres include filter
+        if genres_include:
+            inc_tags = [gi.strip().lower() for gi in genres_include if gi.strip()]
+            if inc_tags and not any(it in cand_genres for it in inc_tags):
+                continue
+
+        # Genre correlation relevance score
         genre_relevance = 0.0
         if genre_filter and info["genres"] and _genre_corr is not None:
             anime_genres = [g.strip() for g in info["genres"].split(",") if g.strip()]
@@ -1134,25 +1194,14 @@ def recommend(
                 per_req: list[float] = []
                 for req_genre in genre_filter:
                     if req_genre in DEMOGRAPHIC_GENRES:
-                        # Reversed: P(req_genre | anime_genre)
                         total_corr = sum(
                             _genre_corr.get((req_genre, ag), 0.0) for ag in anime_genres
                         )
                     else:
-                        # Standard: P(anime_genre | req_genre)
                         total_corr = sum(
                             _genre_corr.get((ag, req_genre), 0.0) for ag in anime_genres
                         )
-                    # Normalize: divide by genre count (max possible = 1.0 per genre)
                     per_req.append(total_corr / len(anime_genres))
-                # Multi-genre aggregation: geometric mean.
-                # Penalises imbalanced scores more than arithmetic mean but less than min.
-                # Examples for "Romance Horror":
-                #   Toradora! (0.50, 0.02) → geomean = 0.10 < 0.13 → zeroed ✓
-                #   Bakemonogatari (0.29, 0.19) → geomean = 0.23 → passes ✓
-                # Examples for "Isekai Horror":
-                #   Overlord (0.70, 0.10) → geomean = 0.26 → passes ✓  (min would zero it)
-                #   Toradora! (0.05, 0.04) → geomean = 0.045 → zeroed ✓
                 if len(per_req) > 1:
                     log_sum = sum(math.log(max(s, 1e-9)) for s in per_req)
                     raw = math.exp(log_sum / len(per_req))
@@ -1160,25 +1209,20 @@ def recommend(
                     raw = per_req[0]
                 genre_relevance = raw if raw >= GENRE_THRESHOLD else 0.0
 
-        # Era proximity score: Gaussian centred on preferred_year.
-        # exp(-((candidate_year - preferred_year) / ERA_SIGMA)^2)
-        # → 1.0 at exact match, ~0.61 at ±sigma years, ~0.14 at ±2σ years.
-        # Disabled (0.0) when preferred_year is unknown or anime has no year.
+        # Era proximity score (Gaussian centred on preferred_year)
         era_score = 0.0
-        if preferred_year is not None:
-            candidate_year = info.get("year")
-            if candidate_year is not None:
-                diff = (candidate_year - preferred_year) / ERA_SIGMA
-                era_score = math.exp(-(diff ** 2))
+        if preferred_year is not None and cand_year is not None:
+            diff = (cand_year - preferred_year) / ERA_SIGMA
+            era_score = math.exp(-(diff ** 2))
 
         # Normalised sub-scores
         norm_score = (info["score"] - score_min) / score_range
         norm_pop = info["members"] / members_max
-        vis_sim = float(masked_sims[row_idx])
+        vis_sim = float(sims[row_idx]) if sims is not None else 0.0
 
         plot_sim = 0.0
         audio_sim = None
-        active_w_sim = W_SIM
+        active_w_sim = visual_weight if (query_vec is not None) else 0.0
         active_w_plot = 0.0
         active_w_audio = 0.0
 
@@ -1186,56 +1230,66 @@ def recommend(
             syn_idx = _synopsis_index.get(str(mal_id))
             if syn_idx is not None:
                 plot_sim = float(plot_sims[syn_idx])
-                active_w_plot = W_PLOT
+                active_w_plot = plot_weight
 
         if audio_sims is not None and _audio_index is not None:
             a_idx = _audio_index.get(str(mal_id))
             if a_idx is not None:
                 audio_sim = float(audio_sims[a_idx])
             else:
-                # User preference: missing audio shouldn't suffer. Use neutral mean.
                 audio_sim = neutral_audio_sim
-            active_w_audio = W_AUDIO
+            active_w_audio = audio_weight
 
-        final = (active_w_sim * vis_sim + active_w_plot * plot_sim + active_w_audio * (audio_sim or 0.0)
+        # Dynamically normalize modality weights so user tuning slider ratios govern ranking
+        total_modality_w = active_w_sim + active_w_plot + active_w_audio
+        if total_modality_w > 0:
+            scale = 0.90 / total_modality_w
+            norm_w_sim = active_w_sim * scale
+            norm_w_plot = active_w_plot * scale
+            norm_w_audio = active_w_audio * scale
+        else:
+            norm_w_sim, norm_w_plot, norm_w_audio = 0.50, 0.30, 0.10
+
+        final = (norm_w_sim * vis_sim + norm_w_plot * plot_sim + norm_w_audio * (audio_sim or 0.0)
                  + W_SCORE * norm_score + W_POP * norm_pop + W_GENRE * genre_relevance + W_ERA * era_score)
 
         candidates.append((final, vis_sim, plot_sim if plot_sims is not None else None, 
                            audio_sim if audio_sims is not None else None, mal_id, info))
 
-    # Sort by final score descending
     candidates.sort(key=lambda x: x[0], reverse=True)
 
     # ── 8. MMR diversity re-ranking (vectorized) ──────────────────────────────
-    # Pre-seed with the query vector so even the first pick is penalised for
-    # being too close to the taste centroid (prevents Toradora!/Charlotte bias).
     selected: list[tuple] = []
     remaining = list(candidates)
-    selected_embs: list[np.ndarray] = [query_vec]  # seed: the query itself
+    selected_embs: list[np.ndarray] = [query_vec] if query_vec is not None else []
 
     while len(selected) < top_n and remaining:
-        cand_indices = [_index.get(str(r[4])) if _index else None for r in remaining]
-        selected_matrix = np.stack(selected_embs)  # [S, D]
+        if selected_embs and _embeddings_matrix is not None:
+            cand_indices = [_index.get(str(r[4])) if _index else None for r in remaining]
+            selected_matrix = np.stack(selected_embs)
 
-        valid_mask = [idx is not None for idx in cand_indices]
-        valid_row_idxs = [idx for idx in cand_indices if idx is not None]
+            valid_mask = [idx is not None for idx in cand_indices]
+            valid_row_idxs = [idx for idx in cand_indices if idx is not None]
 
-        if valid_row_idxs and _embeddings_matrix is not None:
-            cand_matrix = _embeddings_matrix[valid_row_idxs]  # [V, D]
-            sim_matrix = cand_matrix @ selected_matrix.T       # [V, S]
-            max_sims_valid = np.max(sim_matrix, axis=1)        # [V]
+            if valid_row_idxs:
+                cand_matrix = _embeddings_matrix[valid_row_idxs]
+                sim_matrix = cand_matrix @ selected_matrix.T
+                max_sims_valid = np.max(sim_matrix, axis=1)
 
-            max_sims = np.zeros(len(remaining), dtype=np.float32)
-            v_idx = 0
-            for i, is_valid in enumerate(valid_mask):
-                if is_valid:
-                    max_sims[i] = max_sims_valid[v_idx]
-                    v_idx += 1
+                max_sims = np.zeros(len(remaining), dtype=np.float32)
+                v_idx = 0
+                for i, is_valid in enumerate(valid_mask):
+                    if is_valid:
+                        max_sims[i] = max_sims_valid[v_idx]
+                        v_idx += 1
+            else:
+                max_sims = np.zeros(len(remaining), dtype=np.float32)
         else:
             max_sims = np.zeros(len(remaining), dtype=np.float32)
 
         finals = np.array([r[0] for r in remaining], dtype=np.float32)
-        mmr_scores = (1 - MMR_LAMBDA) * finals - MMR_LAMBDA * max_sims
+        eff_lambda = max(0.1, min(0.95, diversity_lambda))
+        mmr_scores = eff_lambda * finals - (1.0 - eff_lambda) * max_sims
 
         best_idx = int(np.argmax(mmr_scores))
         chosen = remaining.pop(best_idx)
@@ -1245,10 +1299,39 @@ def recommend(
         if _index and str(chosen_mid) in _index and _embeddings_matrix is not None:
             selected_embs.append(_embeddings_matrix[_index[str(chosen_mid)]])
 
-
     # ── 9. Build results ──────────────────────────────────────────────────────
     results = []
     for rank, (final, vis_sim, plot_sim, audio_sim, mal_id, info) in enumerate(selected, start=1):
+        reason_parts = []
+        if vis_sim and vis_sim > 0 and query_vec is not None:
+            reason_parts.append(f"{min(99, max(50, round(vis_sim * 100)))}% Visual Vibe")
+        if plot_sim is not None and plot_sim > 0:
+            reason_parts.append(f"{min(99, max(50, round(plot_sim * 100)))}% Narrative Alignment")
+        elif audio_sim is not None and audio_sim > 0:
+            reason_parts.append(f"{min(99, max(50, round(audio_sim * 100)))}% Acoustic Resonance")
+        elif info.get("genres"):
+            first_g = info["genres"].split(",")[0].strip()
+            reason_parts.append(f"Top {first_g} Affinity")
+        match_reason = " • ".join(reason_parts) if reason_parts else f"{min(99, max(50, round((plot_sim or vis_sim or 0.7) * 100)))}% Aesthetic Match"
+
+        comp_parts = []
+        comp_weights = []
+        if query_vec is not None and vis_sim is not None:
+            comp_parts.append(vis_sim * norm_w_sim)
+            comp_weights.append(norm_w_sim)
+        if plot_sim is not None:
+            comp_parts.append(plot_sim * norm_w_plot)
+            comp_weights.append(norm_w_plot)
+        if audio_sim is not None:
+            comp_parts.append(audio_sim * norm_w_audio)
+            comp_weights.append(norm_w_audio)
+
+        total_w = sum(comp_weights)
+        if total_w > 0:
+            comp_sim = max(0.1, min(0.99, sum(comp_parts) / total_w))
+        else:
+            comp_sim = max(0.1, min(0.99, vis_sim if vis_sim > 0 else (plot_sim or 0.70)))
+
         results.append(Recommendation(
             rank=rank,
             mal_id=mal_id,
@@ -1259,10 +1342,12 @@ def recommend(
             score=info["score"],
             members=info["members"],
             local_image_path=info["local_image_path"],
-            similarity=round(vis_sim, 4),
+            similarity=round(comp_sim, 4),
             plot_similarity=round(plot_sim, 4) if plot_sim is not None else None,
             audio_similarity=round(audio_sim, 4) if audio_sim is not None else None,
             final_score=round(final, 4),
+            visual_similarity=round(vis_sim, 4) if query_vec is not None else None,
+            match_reason=match_reason,
         ))
 
     return results

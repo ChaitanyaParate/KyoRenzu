@@ -273,6 +273,14 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at DESC);")
+        
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         conn.commit()
 
     # 2. Anime Data DB Covering Indexes
@@ -730,16 +738,77 @@ async def trigger_ota_sync():
     return {"status": "started", "message": "OTA catalog & embedding sync started in background."}
 
 class RecommendRequest(BaseModel):
-    anime_input: str
+    anime_input: Optional[str] = ""
     preference: Optional[str] = ""
     plot_preference: Optional[str] = ""
     audio_preference: Optional[str] = ""
     top_n: int = 6
     preferred_year: Optional[int] = None
     use_library: Optional[bool] = False
+    visual_weight: Optional[float] = 0.50
+    plot_weight: Optional[float] = 0.35
+    audio_weight: Optional[float] = 0.15
+    diversity_lambda: Optional[float] = 0.68
+    negative_anime_input: Optional[str] = ""
+    exclude_completed: Optional[bool] = True
+    exclude_statuses: Optional[list[str]] = ["Completed", "Watching", "Dropped"]
+    year_min: Optional[int] = None
+    year_max: Optional[int] = None
+    min_score: Optional[float] = None
+    formats: Optional[list[str]] = None
+    genres_include: Optional[list[str]] = None
+    genres_exclude: Optional[list[str]] = None
 
 def _compute_recommendations_sync(req: RecommendRequest):
     try:
+        # Determine effective exclude statuses
+        statuses_to_exclude = req.exclude_statuses
+        if statuses_to_exclude is None and req.exclude_completed:
+            statuses_to_exclude = ["Completed", "Watching", "Dropped"]
+        elif req.exclude_completed is False:
+            statuses_to_exclude = []
+
+        user_excluded_ids = set()
+        user_excluded_titles = []
+        user_franchise_prefixes = []
+
+        if statuses_to_exclude and os.path.exists(USER_LIBRARY_DB_PATH):
+            try:
+                with get_db_connection(USER_LIBRARY_DB_PATH) as udb:
+                    udb_cursor = udb.cursor()
+                    upper_statuses = [s.upper() for s in statuses_to_exclude]
+                    if "ALL" in upper_statuses or "ALL IN-LIBRARY" in upper_statuses:
+                        rows = udb_cursor.execute("SELECT mal_id, anime_title, episodes_watched FROM user_library").fetchall()
+                    else:
+                        placeholders = ",".join("?" for _ in statuses_to_exclude)
+                        rows = udb_cursor.execute(f"SELECT mal_id, anime_title, episodes_watched FROM user_library WHERE status IN ({placeholders})", statuses_to_exclude).fetchall()
+
+                    for mid, mtitle, ep_watched in rows:
+                        user_excluded_ids.add(mid)
+                        if mtitle:
+                            clean_t = mtitle.strip().lower()
+                            user_excluded_titles.append(clean_t)
+                            base_prefix = re.split(r'[:\-\–\—\(\]]', clean_t)[0].strip()
+                            if len(base_prefix) >= 4:
+                                user_franchise_prefixes.append(base_prefix)
+
+                    # When 'Completed' is requested, also catch any show where all episodes were watched
+                    if any("COMPLET" in s for s in upper_statuses):
+                        more_rows = udb_cursor.execute("SELECT mal_id, anime_title, episodes_watched FROM user_library WHERE status NOT IN ('Completed') AND episodes_watched > 0").fetchall()
+                        if more_rows:
+                            mids_to_check = [r[0] for r in more_rows]
+                            with get_db_connection(ANIME_DATA_DB_PATH) as adb:
+                                adb_cursor = adb.cursor()
+                                total_eps = dict(adb_cursor.execute(f"SELECT mal_id, episodes FROM anime WHERE mal_id IN ({','.join(map(str, mids_to_check))})").fetchall())
+                            for mid, mtitle, ep_watched in more_rows:
+                                ep_limit = total_eps.get(mid)
+                                if ep_limit and ep_limit > 0 and (ep_watched or 0) >= ep_limit:
+                                    user_excluded_ids.add(mid)
+                                    if mtitle:
+                                        user_excluded_titles.append(mtitle.strip().lower())
+            except Exception as e:
+                print(f"[api.py] Error reading library anime for exclusion: {e}")
+
         # Parse liked anime
         liked_anime = []
         if req.use_library:
@@ -780,13 +849,18 @@ def _compute_recommendations_sync(req: RecommendRequest):
                             local_image_path=row['local_image_path'],
                             weight=weight
                         ))
-        else:
-            liked_anime = auto_parse(req.anime_input.strip() if req.anime_input else "")
-            
-        if not liked_anime:
-            raise HTTPException(status_code=400, detail="Could not resolve any anime from input or library.")
-            
-        # Encode preference
+
+        # Support combining user_library WITH manual anime seeds simultaneously
+        if req.anime_input and req.anime_input.strip():
+            manual_entries = auto_parse(req.anime_input.strip())
+            liked_anime.extend(manual_entries)
+
+        # Parse optional negative repulsor anime
+        negative_anime = []
+        if req.negative_anime_input and req.negative_anime_input.strip():
+            negative_anime = auto_parse(req.negative_anime_input.strip())
+
+        # Encode preference text
         pref_text = req.preference.strip() if req.preference else ""
         text_embedding = None
         genre_filter = None
@@ -801,33 +875,58 @@ def _compute_recommendations_sync(req: RecommendRequest):
                 
         plot_pref_text = req.plot_preference.strip() if req.plot_preference else None
         audio_pref_text = req.audio_preference.strip() if req.audio_preference else None
+
+        # Seedless "Pure Prompt" queries allowed: only reject if NO input is provided anywhere
+        if not liked_anime and not pref_text and not plot_pref_text and not audio_pref_text:
+            raise HTTPException(status_code=400, detail="Please provide at least one input: an anime seed, personal library, or a prompt.")
         
         n_candidates = max(req.top_n * 5, 150) + ((len(genre_filter) * 50) if genre_filter else 0)
-        fetch_n = req.top_n + len(liked_anime) + 50
+        fetch_n = req.top_n + len(liked_anime) + (len(negative_anime) if negative_anime else 0) + len(user_excluded_ids) + 50
         
         results = core_recommend(
-            liked_anime=liked_anime,
+            liked_anime=liked_anime if liked_anime else None,
             preference_text_embed=text_embedding,
             plot_preference_text=plot_pref_text,
             audio_preference_text=audio_pref_text,
             genre_filter=genre_filter,
             era_year=era_year,
             top_n=fetch_n,
-            n_candidates=n_candidates
+            n_candidates=n_candidates,
+            visual_weight=float(req.visual_weight if req.visual_weight is not None else 0.50),
+            plot_weight=float(req.plot_weight if req.plot_weight is not None else 0.35),
+            audio_weight=float(req.audio_weight if req.audio_weight is not None else 0.15),
+            diversity_lambda=float(req.diversity_lambda if req.diversity_lambda is not None else 0.68),
+            negative_anime=negative_anime if negative_anime else None,
+            exclude_mal_ids=user_excluded_ids if user_excluded_ids else None,
+            year_min=req.year_min,
+            year_max=req.year_max,
+            min_score=req.min_score,
+            formats=req.formats,
+            genres_include=req.genres_include,
+            genres_exclude=req.genres_exclude,
         )
         
         if not results:
-            return {"status": "error", "message": "No recommendations found.", "results": []}
+            return {"status": "error", "message": "No recommendations found matching your criteria.", "results": []}
 
-        # Post filter to remove things already in the input
+        # Post filter to remove things already in the input and completed anime
         EXCLUSION_THRESHOLD = 78
-        raw_input_titles = get_all_raw_titles(req.anime_input.strip())
+        raw_input_titles = get_all_raw_titles(req.anime_input.strip()) if req.anime_input else []
+        if req.negative_anime_input:
+            raw_input_titles.extend(get_all_raw_titles(req.negative_anime_input.strip()))
 
         def _is_watched(rec) -> bool:
+            if rec.mal_id in user_excluded_ids:
+                return True
             candidates = [
                 rec.title.lower() if rec.title else "",
                 rec.title_english.lower() if rec.title_english else "",
             ]
+            if user_excluded_titles:
+                for comp_title in user_excluded_titles:
+                    for cand in candidates:
+                        if cand and (cand == comp_title or fuzz.WRatio(comp_title, cand) >= 90):
+                            return True
             for raw_title in raw_input_titles:
                 if not raw_title or raw_title.isdigit() or len(raw_title) <= 2:
                     continue
@@ -865,14 +964,16 @@ def _compute_recommendations_sync(req: RecommendRequest):
                     "members": r.members,
                     "genres": r.genres,
                     "similarity": r.similarity,
+                    "visual_similarity": getattr(r, 'visual_similarity', r.similarity),
                     "plot_similarity": r.plot_similarity,
                     "audio_similarity": r.audio_similarity,
+                    "match_reason": getattr(r, 'match_reason', None),
                     "cover_url": cover_url,
                     "year": year,
                     "episodes": episodes
                 })
             
-        return {"status": "success", "results": output}
+        return {"status": "success", "results": output, "recommendations": output}
         
     except Exception as e:
         traceback.print_exc()
@@ -2392,6 +2493,36 @@ async def get_episodes_web_search(title: str):
         return {"status": "error", "message": "Could not find episode count in web search"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+class ThemeSettingRequest(BaseModel):
+    theme: str
+
+@app.get("/api/settings/theme")
+async def get_theme_setting():
+    try:
+        with get_db_connection(USER_LIBRARY_DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM app_settings WHERE key = 'theme'")
+            row = cursor.fetchone()
+            if row and row[0]:
+                return {"theme": row[0]}
+    except Exception as e:
+        logger.warning(f"Failed to load theme setting from database: {e}")
+    return {"theme": "azure"}
+
+@app.post("/api/settings/theme")
+async def set_theme_setting(req: ThemeSettingRequest):
+    try:
+        with get_db_connection(USER_LIBRARY_DB_PATH) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO app_settings (key, value, updated_at) 
+                VALUES ('theme', ?, CURRENT_TIMESTAMP)
+            """, (req.theme,))
+            conn.commit()
+            return {"status": "success", "theme": req.theme}
+    except Exception as e:
+        logger.error(f"Failed to persist theme setting: {e}")
+        return {"status": "error", "error": str(e), "theme": req.theme}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=API_PORT)

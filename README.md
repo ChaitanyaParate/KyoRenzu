@@ -18,7 +18,7 @@
 
 **"Don't judge a book by its cover" — but we absolutely will judge anime by theirs.**
 
-[Download AppImage (Linux)](#-download--quickstart) • [Architecture Overview](#-system-architecture) • [Portability & Packaging Pipeline](#-hardware-agnostic-cpu-build--packaging-pipeline) • [Autonomous OTA Pipeline](#-autonomous-ota-delta-sync--live-embedding-engine) • [ML Formulation](#-multimodal-machine-learning-engine) • [Library 2.0 & Taste DNA](#-library-20--ml-taste-analytics-hub) • [API Specification](#-exhaustive-api-reference) • [Performance Benchmarks](#-production-benchmarks--performance-gains) • [Verification Suite](#-11-test-automated-verification--benchmark-suite) • [Developer Setup](#-building-from-source)
+[Download AppImage (Linux)](#-download--quickstart) • [Architecture Overview](#-system-architecture) • [Portability & Packaging Pipeline](#-hardware-agnostic-cpu-build--packaging-pipeline) • [Autonomous OTA Pipeline](#-autonomous-ota-delta-sync--live-embedding-engine) • [ML Formulation](#-multimodal-machine-learning-engine) • [AI Discover Studio & Themes](#-ai-discover-studio--color-aesthetic-studio) • [Library 2.0 & Taste DNA](#-library-20--ml-taste-analytics-hub) • [API Specification](#-exhaustive-api-reference) • [Performance Benchmarks](#-production-benchmarks--performance-gains) • [Verification Suite](#-11-test-automated-verification--benchmark-suite) • [Developer Setup](#-building-from-source)
 
 </div>
 
@@ -28,7 +28,7 @@
 
 **KyōRenzu (共レンズ — Resonance Lens)** is an industrial-grade desktop streaming workstation, autonomous data synchronization engine, and multimodal artificial intelligence recommendation system. Engineered for performance purists, desktop power users, and machine learning researchers, KyōRenzu bridges the chasm between deep high-dimensional neural vector models and instantaneous, zero-ad hardware-accelerated video playback.
 
-Traditional anime recommendation systems suffer from severe collaborative filtering cold-start dilemmas, generic tag pollution, and static database obsolescence. KyōRenzu redefines discovery through **ten architectural pillars**:
+Traditional anime recommendation systems suffer from severe collaborative filtering cold-start dilemmas, generic tag pollution, and static database obsolescence. KyōRenzu redefines discovery through **twelve architectural pillars**:
 
 1. **Computer Vision (Visual Aesthetic Representation)**: 768-dimensional visual vectors extracted from over 30,000 high-resolution key visuals using **OpenAI CLIP (ViT-Large/14)**, with automated fallback to CLIP textual projection for corrupted or missing media.
 2. **Natural Language Processing (Semantic Narrative Alignment)**: 384-dimensional dense sentence embeddings capturing plot synopses, character dynamics, and narrative themes via **SentenceTransformers (`all-MiniLM-L6-v2`)**.
@@ -39,7 +39,9 @@ Traditional anime recommendation systems suffer from severe collaborative filter
 7. **Native Hardware-Accelerated Video Delivery & Portability**: Decoupled POSIX process orchestration driving `ani-cli` and `mpv` over user-scoped Unix domain socket IPC (`$XDG_RUNTIME_DIR/kyorenzu-mpv.sock` or `/tmp/kyorenzu-{uid}/kyorenzu-mpv.sock`) with zero host Python dependencies, session-scoped idempotent scrobbling, and two-tier process group teardown.
 8. **Ultra-Slim Hardware-Agnostic CPU Distribution**: Fully decoupled from host GPU drivers, proprietary CUDA runtimes, and local Python interpreters. By isolating CPU-only PyTorch runtimes, dynamic symbol stripping, and aggressive dead-code pruning, the standalone Python backend binary was compressed from **2.76 GB to 243 MB (-91.2%)**, reducing the final Linux AppImage from **2.86 GB to 360 MB (-87.4%)** while executing seamlessly across Intel, AMD Radeon, and NVIDIA systems under both X11 and Wayland sessions.
 9. **Autonomous Audio Track Failover & Stream Sanitization**: Zero-crash playback retry that detects missing English dub sources (`"No sources found for dub!"`), automatically falls back to Sub mode without throwing error dialogs, and filters out all ECMA-48/VT100 ANSI terminal escape codes (`\x1b[2K`, `[1;34m`, cursor movement codes) for human-readable toast notifications.
-10. **Curated High-Contrast Dark-Mode Design & Rigid Media Geometry**: Premium OLED Obsidian (`#07080B`), Electric Cerulean (`#00A3FF`), and Neon Sakura (`#FF2A85`) aesthetics with a circular optical aperture lens emblem, coupled with strict `56px x 80px` CSS-constrained media containers, glass placeholders, and image error suppression preventing broken layout text overflows.
+10. **AI Discover Studio & Progressive Multimodal Synthesis**: Pure-prompt, seed-based, or hybrid taste synthesis combining Genres, Story Tropes, and Acoustic Vibes with interactive `+` / `−` seed badges (positive anchors vs. negative repulsors), live catalog autocomplete, granular library exclusion (`Hide Completed`, `Hide Watched/Watching`, `Hide Entire Library`, `Show All`), hard metadata filters (Minimum MAL score, TV/Movie/OVA formats, genre exclusion), on-focus progressive disclosure chips, and cross-environment custom preset persistence.
+11. **Color Aesthetic Studio (12-Theme OLED Engine)**: 12 hand-tuned colorways anchored by **Obsidian Azure** (`#00A3FF` / `#FF2A85` on `#07080B`), with instant CSS token injection, glassmorphic backdrop filters, and dual-layer persistence (localStorage + backend SQLite settings) surviving both web and desktop AppImage cold restarts.
+12. **Curated High-Contrast Dark-Mode Design & Rigid Media Geometry**: Premium OLED Obsidian (`#07080B`), Electric Cerulean (`#00A3FF`), and Neon Sakura (`#FF2A85`) aesthetics with a circular optical aperture lens emblem, coupled with strict `56px x 80px` CSS-constrained media containers, glass placeholders, and image error suppression preventing broken layout text overflows.
 
 ---
 
@@ -319,6 +321,13 @@ $$w_i = \begin{cases}
 0.1 & \text{if } r_i < 2.0
 \end{cases}$$
 
+#### Negative Repulsor Taste Steering
+When users specify negative anime seeds or repulsor titles (e.g. steering away from specific aesthetics, tropes, or overexposed franchises), KyōRenzu computes a repulsor centroid $\mathbf{v}_{\text{negative}}$ and subtracts it with steering coefficient $\mu = 0.45$:
+
+$$\mathbf{v}_{\text{taste}} = \frac{\mathbf{v}_{\text{positive}} - \mu \cdot \mathbf{v}_{\text{negative}}}{\max(\|\mathbf{v}_{\text{positive}} - \mu \cdot \mathbf{v}_{\text{negative}}\|_2, 10^{-12})}$$
+
+This repels candidate selection away from unwanted thematic directions while preserving positive user affinity.
+
 #### Semantic Narrative & Audio Vectors
 - **Plot Representation**: Natural language queries and plot themes are encoded into 384-d space:
   $$\mathbf{v}_{\text{plot}} = \frac{\text{MiniLM}(\text{plot\_prompt})}{\max(\|\text{MiniLM}(\text{plot\_prompt})\|_2, 10^{-12})}$$
@@ -335,8 +344,8 @@ $$\text{EraPenalty}(Y_{\text{pref}}, Y_c) = \exp\left( - \frac{(Y_c - Y_{\text{p
 
 #### Composite Similarity Score
 For candidate anime $c$ with pre-normalized embeddings:
-$$S_{\text{raw}}(c) = \alpha \cos(\mathbf{v}_{\text{visual}}, \hat{\mathbf{e}}_c^{\text{cover}}) + \beta \cos(\mathbf{v}_{\text{plot}}, \hat{\mathbf{e}}_c^{\text{synopsis}}) + \gamma \cos(\mathbf{v}_{\text{audio}}, \hat{\mathbf{e}}_c^{\text{audio}}) + \delta \cdot \text{GenreCorr}(G_u, G_c) + \lambda \cdot \text{EraPenalty}(Y_{\text{pref}}, Y_c)$$
-*Default production hyperparameters: $\alpha = 0.50$, $\beta = 0.35$, $\gamma = 0.15$, $\delta = 0.20$, $\lambda = 0.10$.*
+$$S_{\text{raw}}(c) = w_{\text{genre}} \cos(\mathbf{v}_{\text{genre}}, \hat{\mathbf{e}}_c^{\text{cover}}) + w_{\text{plot}} \cos(\mathbf{v}_{\text{plot}}, \hat{\mathbf{e}}_c^{\text{synopsis}}) + w_{\text{audio}} \cos(\mathbf{v}_{\text{audio}}, \hat{\mathbf{e}}_c^{\text{audio}}) + \delta \cdot \text{GenreCorr}(G_u, G_c) + \lambda \cdot \text{EraPenalty}(Y_{\text{pref}}, Y_c)$$
+*Default production hyperparameters: $w_{\text{genre}} = 0.50$, $w_{\text{plot}} = 0.35$, $w_{\text{audio}} = 0.15$, $\delta = 0.20$, $\lambda = 0.10$.*
 
 ---
 
@@ -352,6 +361,119 @@ Where $\lambda_{\text{div}} \in [0, 1]$ balances pure relevance ($\lambda = 1.0$
 Instead of slow $O(|C| \cdot |S|)$ Python loops, KyōRenzu stacks selected vectors into matrix $\mathbf{S} \in \mathbb{R}^{|S| \times D}$ and candidate vectors into $\mathbf{C} \in \mathbb{R}^{|C| \times D}$. The cross-similarity matrix is computed in a single BLAS call:
 $$\mathbf{M}_{\text{sim}} = \mathbf{C} \mathbf{S}^T \in \mathbb{R}^{|C| \times |S|}$$
 The maximum similarity per candidate is extracted using `np.max(M_sim, axis=1)`. Zero-norm protection prevents floating-point overflow or division-by-zero errors.
+
+---
+
+## 🎨 AI Discover Studio & Color Aesthetic Studio
+
+The **AI Discover Studio** ([web/src/App.tsx](web/src/App.tsx)) is KyōRenzu's cross-modal synthesis console. It features progressive disclosure, interactive negative repulsor chips, hard metadata constraint pruning, flexible era controls, custom user preset persistence, and a 12-theme OLED design system.
+
+```mermaid
+flowchart TD
+    subgraph InputMatrix ["Multimodal Prompt Matrix & Reference Seeds"]
+        Seeds["Reference Seeds Bar\n(Positive Anchors + / Negative Repulsors −)\nLive Autocomplete Dropdown"]
+        Card1["Genres Modality Card\n(On-Focus Suggestion Chips:\nAction, Sci-Fi, Psychological, Cyberpunk...)"]
+        Card2["Story & Theme Modality Card\n(On-Focus Suggestion Chips:\nTime Loop, Space Bounty Hunters, Found Family...)"]
+        Card3["Acoustic Vibe Modality Card\n(On-Focus Suggestion Chips:\nSmooth Jazz, Synthwave, Melancholic Piano...)"]
+    end
+
+    subgraph Controls ["Synthesis Controls & Hard Filters"]
+        EraCtrl["Flexible Era Control\n(Quick Presets + Custom Range 1980–2026)"]
+        CountCtrl["Result Count Pills (12, 24, 48) + Number Input (1–100)"]
+        ExclDropdown["Exclusion Mode Selector\n(Hide Completed | Hide Watched/Watching | Hide Entire Library | Show All)"]
+        WeightsDrawer["Expandable AI Weights & Hard Filters Drawer\n(4 Neural Sliders + Minimum Score + Formats + Genre Exclusions)"]
+    end
+
+    subgraph BackendSynthesis ["Backend Multimodal Synthesis (api.py & recommender.py)"]
+        QueryBuild["Taste & Prompt Embedding Fusion\n(Pure Prompt | Pure Seeds | Hybrid Library + Seeds)"]
+        FranchisePruning["Bulletproof Completed & Library Pruning\n(Filtered out BEFORE MMR Selection)"]
+        HardFilterPass["Hard Metadata Filter Pass\n(Score >= min_score, Format in formats, Exclude banned genres)"]
+        MMREngine["Vectorized MMR Re-Ranking (C @ S.T)"]
+    end
+
+    subgraph PresetsThemes ["Presets & Design Systems"]
+        CustomModal["Native In-App Modal\n(renderSavePresetModal)\nPersists to localStorage & Instant UI Grid Update"]
+        PresetGrid["Symmetrical 4x2 Theme-Cohesive Grid\n(Custom User Presets with Delete × + Curated Presets)"]
+        ThemeStudio["Color Aesthetic Studio\n(12 OLED Themes with Obsidian Azure Default)"]
+    end
+
+    Seeds --> QueryBuild
+    Card1 --> QueryBuild
+    Card2 --> QueryBuild
+    Card3 --> QueryBuild
+    EraCtrl --> QueryBuild
+    CountCtrl --> MMREngine
+    ExclDropdown --> FranchisePruning
+    WeightsDrawer --> HardFilterPass
+    WeightsDrawer --> MMREngine
+
+    QueryBuild --> FranchisePruning
+    FranchisePruning --> HardFilterPass
+    HardFilterPass --> MMREngine
+    MMREngine --> PresetGrid
+    CustomModal --> PresetGrid
+    ThemeStudio --> InputMatrix
+```
+
+### 1. Progressive Disclosure & Clean Visual Hierarchy
+To eliminate visual clutter and cognitive overload, the Discover Studio enforces progressive disclosure:
+- **Zero Default Clutter**: The 3 modality cards (*Genres*, *Story & Theme*, *Acoustic Vibe*) present a minimalist, distraction-free surface by default.
+- **On-Focus Suggestion Chips (`:focus-within`)**: Interactive suggestion chips slide smoothly into view only when a user focuses within that card, providing rapid ideation without permanently occupying screen real estate.
+- **Unified Header**: Removed redundant fine-tuning buttons, leaving a clean top bar with only `🎲 Surprise Me` (serendipity roll) and `★ + Save Custom Preset`.
+
+### 2. Interactive `+ / -` Seed Chips & Autocomplete
+- **Positive Anchor vs. Negative Repulsor**: Every anime chip added to the Reference Seeds bar features an interactive toggle badge:
+  - **`+` Positive Anchor (`#00A3FF` Cerulean)**: Pulls the taste vector towards this anime's visual, story, and acoustic profile.
+  - **`−` Negative Repulsor (`#FF2A85` Neon Rose)**: Actively steers the taste vector *away* from this anime's tropes, preventing undesired themes.
+- **Live Search Autocomplete**: As you type into the seed input, an off-thread fuzzy matching dropdown suggests matching titles from the 30,000+ catalog in real time.
+- **Simultaneous Library + Seed Blending**: Enabling `Use Library` works concurrently with manual seeds, allowing you to anchor on your personal watchlist while adding specific positive/negative titles on top.
+
+### 3. Maximum Query Freedom (Seedless & Hybrid Queries)
+KyōRenzu removes all artificial query constraints:
+1. **Pure Prompts Only**: Run synthesis with zero anime seeds (e.g., only entering `"Cyberpunk, Psychological"` under Genres and `"A dystopian detective chasing rogue androids"` under Story).
+2. **Pure Anime Seeds Only**: Synthesize recommendations purely from positive/negative anime seeds with zero text prompts.
+3. **Hybrid Blends**: Combine personal library weighting + manual seed chips + freeform natural language prompts across all 3 modalities simultaneously.
+
+### 4. Bulletproof Completed Anime & Franchise Exclusion
+To prevent recommending shows you have already finished:
+- **Exclusion Selector**: Choose between `Hide Completed`, `Hide All Watched/Watching`, `Hide Entire Library`, or `Show All`.
+- **Pre-MMR Pruning**: `api.py` and `recommender.py` query `user_library.db` for all matching MAL IDs, check normalized base franchise prefixes (e.g. eliminating seasons and OVAs of completed franchises), and audit episode counts (`episodes_watched >= total_episodes > 0`). These titles are pruned **before** MMR candidate selection.
+
+### 5. Expandable AI Weights & Hard Metadata Filters Drawer
+Clicking **`⑆ AI Weights & Filters`** reveals an expanded precision control panel:
+- **4 Neural Sliders**:
+  - `Genre Resonance Weight (CLIP %)`: Balances visual aesthetic and genre alignment ($0\% - 100\%$).
+  - `Story Narrative Weight (MiniLM %)`: Balances synopsis narrative similarity ($0\% - 100\%$).
+  - `Acoustic Vibe Weight (CLAP %)`: Balances opening/ending theme musical vibe ($0\% - 100\%$).
+  - `Novelty / Discovery Horizon ($\lambda_{\text{div}}$)`: Vectorized MMR trade-off between *Safe & Familiar* ($\lambda = 0.85$) and *Bold & Adventurous* ($\lambda = 0.45$).
+- **Hard Metadata Filters**:
+  - `Minimum MAL Score Slider`: Hard threshold filter from `Any` up to `8.5+`.
+  - `Format Toggles`: Filter strictly by `ALL`, `TV`, `MOVIE`, or `OVA`.
+  - `Exclude Genres`: Comma-separated list to strictly ban unwanted genres (e.g. `Harem, Ecchi, Kids`).
+
+### 6. Symmetrical 4-Column Grid & Native In-App Custom Presets
+- **Symmetrical 4-Column Preset Grid**: Curated aesthetic presets are organized into a responsive 4-column layout (`grid-template-columns: repeat(4, 1fr)`) with cohesive `--bg-surface` styling, category badges, and clean 1-line descriptions.
+- **Cross-Environment In-App Modal (`renderSavePresetModal`)**:
+  - Replaced browser `window.prompt` with a custom in-app glassmorphic modal, ensuring flawless operation in desktop Electron Linux AppImages where `window.prompt` fails.
+  - Automatically captures active genres, story prompts, acoustic vibes, seeds, weights, and era into `localStorage` (`kyorenzu_custom_presets`).
+  - Personal presets render seamlessly at the top of the preset grid with a dedicated delete `×` button.
+
+### 7. Color Aesthetic Studio (12 OLED Colorways)
+KyōRenzu features 12 hand-tuned color themes built for OLED displays, with **Obsidian Azure** set as default:
+- **Obsidian Azure** (Default): Electric Cerulean (`#00A3FF`) & Neon Rose (`#FF2A85`) on Deep Obsidian (`#07080B`).
+- **Cyberpunk Syndicate**: Neon Violet (`#B026FF`) & Laser Yellow (`#FFDE59`) on Cyber Void (`#08060E`).
+- **Emerald Kodama**: Studio Ghibli Forest Green (`#00E5A3`) & Warm Amber (`#F59E0B`) on Moss Obsidian (`#050B08`).
+- **Blood Moon Crimson**: Gothic Crimson (`#FF2E56`) & Mystic Purple (`#A855F7`) on Abyssal Wine (`#0A0607`).
+- **Sunset Mirage**: 80s City Pop Orange (`#FF6B4A`) & Dream Lavender (`#A78BFA`) on Twilight Purple (`#0A070D`).
+- **Ghost Titanium**: Stealth Sky Blue (`#38BDF8`) & Industrial Rust (`#FB923C`) on Matte Carbon (`#08090A`).
+- **Solar Flare**: Super Saiyan Gold (`#F59E0B`) & Flame Red (`#EF4444`) on Sunburst Black (`#0B0804`).
+- **Neo Tokyo Synth**: Retrowave Hot Pink (`#EC4899`) & Cyber Teal (`#14B8A6`) on Neon Synth (`#09060E`).
+- **Abyssal Amethyst**: Cursed Violet (`#8B5CF6`) & Electric Cyan (`#06B6D4`) on Arcane Void (`#08050D`).
+- **Neon Sakura Bloom**: Spring Blossom Pink (`#F472B6`) & Sky Cerulean (`#38BDF8`) on Hanami Dark (`#0A060A`).
+- **Bifrost Arctic**: Glacial Cyan (`#38E1FF`) & Aurora Indigo (`#818CF8`) on Frost Obsidian (`#05090F`).
+- **Dragon's Inferno**: Molten Ember (`#FF5722`) & Golden Flame (`#FBBF24`) on Ash Black (`#0B0604`).
+
+Theme preferences are persisted across restarts via dual-layer synchronization: local browser `localStorage` + backend SQLite (`user_library.db:app_settings`).
 
 ---
 
@@ -472,9 +594,88 @@ High-speed fuzzy title search across 72,000+ localized and romaji anime titles.
   ]
   ```
 
+#### `GET /api/settings/theme`
+Retrieves the user's persisted theme configuration from `user_library.db:app_settings`.
+- **Response `200 OK`**:
+  ```json
+  {
+    "status": "success",
+    "theme": "azure"
+  }
+  ```
+
+#### `POST /api/settings/theme`
+Persists a new active theme ID (`azure`, `cyberpunk`, `emerald`, `crimson`, `sunset`, `titanium`, etc.) across desktop and web sessions.
+- **Request Body**:
+  ```json
+  {
+    "theme": "azure"
+  }
+  ```
+- **Response `200 OK`**:
+  ```json
+  {
+    "status": "success",
+    "theme": "azure"
+  }
+  ```
+
 ---
 
 ### Recommendation Endpoints
+
+#### `POST /api/recommend`
+Cross-modal neural synthesis endpoint powering the **AI Discover Studio**. Supports pure-prompt, pure-seed, or hybrid multi-modality queries with interactive positive/negative seed weighting, hard metadata filtering, and pre-MMR completed franchise pruning.
+- **Request Body**:
+  ```json
+  {
+    "anime_input": "Cyberpunk: Edgerunners",
+    "negative_anime_input": "Naruto",
+    "preference": "Cyberpunk, Psychological, Sci-Fi",
+    "plot_preference": "A rogue hacker uncovering high-tech corporate conspiracy",
+    "audio_preference": "Synthwave Electronic, heavy bass",
+    "use_library": false,
+    "exclude_completed": true,
+    "exclude_statuses": ["Completed"],
+    "visual_weight": 0.50,
+    "plot_weight": 0.35,
+    "audio_weight": 0.15,
+    "diversity_lambda": 0.68,
+    "min_score": 7.5,
+    "year_min": 2010,
+    "year_max": 2026,
+    "formats": ["TV"],
+    "genres_include": ["Cyberpunk", "Sci-Fi"],
+    "genres_exclude": ["Harem", "Ecchi"],
+    "top_n": 12
+  }
+  ```
+- **Response `200 OK`**:
+  ```json
+  {
+    "status": "success",
+    "results": [
+      {
+        "mal_id": 42310,
+        "rank": 1,
+        "title": "Cyberpunk: Edgerunners",
+        "title_english": "Cyberpunk: Edgerunners",
+        "score": 8.61,
+        "members": 620000,
+        "genres": "Action, Sci-Fi, Cyberpunk",
+        "similarity": 0.942,
+        "visual_similarity": 0.951,
+        "plot_similarity": 0.938,
+        "audio_similarity": 0.912,
+        "match_reason": "High visual and thematic resonance with your prompt",
+        "cover_url": "http://localhost:8000/covers/42310.jpg",
+        "year": "2022",
+        "episodes": 10
+      }
+    ],
+    "recommendations": [...]
+  }
+  ```
 
 #### `GET /api/recommendations/{mal_id}`
 Returns top-N multimodal recommendations for a specific anime ID using in-memory pre-cached matrices in $< 15\text{ms}$.
@@ -671,7 +872,7 @@ KyōRenzu includes a comprehensive end-to-end reliability, numerical safety, inv
 ### 1. Download AppImage (Linux)
 KyōRenzu is distributed as a self-contained portable AppImage. On first execution, it automatically initialises directories and hydrates database, embeddings, and cover assets directly into `~/.local/share/KyoRenzu/`.
 
-📥 **[Download KyoRenzu 1.0.0 AppImage (Google Drive)](https://drive.google.com/file/d/1rpoetLZnyY9RVqt53rgZSLc00Vr0Uc8Z/view?usp=sharing)**
+📥 **[Download KyoRenzu 1.0.0 AppImage (Google Drive)](https://drive.google.com/file/d/1yyyV8D3Aq-eon5ARbEWiRJiyJk5zVj7d/view?usp=sharing)**
 
 ```bash
 # Make binary executable and launch
@@ -793,9 +994,9 @@ KyoRenzu/
 
 ---
 
-## 🛡️ Ten Mandatory Engineering Guardrails
+## 🛡️ Twelve Mandatory Engineering Guardrails
 
-KyōRenzu's architecture is anchored by ten non-negotiable engineering mandates:
+KyōRenzu's architecture is anchored by twelve non-negotiable engineering mandates:
 
 1. **Idempotent & Episode-Aware MPV Scrobbling**: Progress listener strictly bounds database updates to once per episode launch via session-scoped `has_scrobbled` flags, incrementing with `MAX(episodes_watched, played_episode)`.
 2. **Two-Tier Subprocess Teardown**: Isolates `ani-cli` in a dedicated session PGID (`os.setsid`) and guarantees teardown via Python `lifespan`/`atexit` hooks and Electron `process.kill(-pid, 'SIGTERM')`.
@@ -807,6 +1008,8 @@ KyōRenzu's architecture is anchored by ten non-negotiable engineering mandates:
 8. **Hardware-Agnostic CPU Portability**: The packaged distribution is strictly bound to CPU-only PyTorch runtimes with symbol-stripped shared libraries and dynamic port negotiation, ensuring zero CUDA driver dependencies and flawless execution across NVIDIA, AMD, and Intel GPUs on both Wayland and X11 sessions.
 9. **Autonomous Audio Track Failover & Stream Sanitization**: Playback invocations requesting English dub tracks automatically intercept provider source exhaustion (`"No sources found for dub!"`) and immediately re-trigger in Sub mode with zero UI crashes or blocking dialogs, while all stderr/stdout streams undergo two-tier ECMA-48/VT100 escape sequence cleansing (`\x1b[...]`, cursor repositioning, orphaned brackets) for human-readable notifications.
 10. **Rigid Media Geometry & Local-First Asset Resolution**: In-memory catalog joins in `/api/user_library` prioritize local disk caches in `$COVERS_DIR` over transient third-party CDN/S3 signatures, while frontend list items strictly isolate image elements within `56px x 80px` CSS-constrained wrappers featuring glass placeholders (`<ImageIcon />`) and broken-image suppression (`alt=""`, `onError` display hiding) that completely prevents broken media text bleeding or layout deformation.
+11. **Cross-Environment Modal Safety & Zero Window.Prompt Reliance**: Client dialog interactions (e.g. saving custom aesthetic presets, setting profiles) strictly avoid blocking synchronous browser primitives (`window.prompt`, `window.alert`, `window.confirm`), implementing custom in-app glassmorphic modal controllers (`renderSavePresetModal`) that operate identically across standard web browsers and packaged Electron Linux AppImage environments where Chromium disables native prompt dialogues.
+12. **Seedless Pure-Prompt & Multi-Centroid Latent Projection**: The recommendation pipeline guarantees mathematical resolution for seedless queries (zero positive/negative anime seeds) by dynamically deriving candidate dot products directly from encoded CLIP and MiniLM text projections, while negative repulsor vectors are strictly bound by cosine angular limits to prevent inverted gradient explosions.
 
 ---
 

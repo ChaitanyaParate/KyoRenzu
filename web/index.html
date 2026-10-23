@@ -1,10 +1,24 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="azure">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>KyōRenzu</title>
+    <script>
+      (function() {
+        try {
+          var t = localStorage.getItem('kyorenzu_color_theme');
+          if (t && t !== 'crimson' && t !== 'sunset') {
+            document.documentElement.setAttribute('data-theme', t);
+          } else {
+            document.documentElement.setAttribute('data-theme', 'azure');
+          }
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'azure');
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
